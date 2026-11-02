@@ -1,0 +1,7 @@
+状态: {status}
+线上链接: {url}
+docid: {docid}
+本地副本: {backup}
+manifest: {manifest_status} {manifest_path}
+{external_notice}
+待办: {todo}

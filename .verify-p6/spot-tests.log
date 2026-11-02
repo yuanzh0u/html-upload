@@ -1,0 +1,23 @@
+test_cred_file_crlf_trailing_newline_defect (test_adversarial_agy.CredentialsAdversarial.test_cred_file_crlf_trailing_newline_defect)
+A CRLF-terminated credential authenticates with only the token bytes. ... ok
+test_cred_env_trailing_newline_defect (test_adversarial_agy.CredentialsAdversarial.test_cred_env_trailing_newline_defect)
+Environment credentials use the same trailing CR/LF policy as files. ... ok
+test_html_meta_charset_conflict_defect (test_adversarial_agy.HTMLValidationAdversarial.test_html_meta_charset_conflict_defect)
+A non-UTF-8 charset declaration is rejected before any upload request. ... ok
+test_charset_conflicts_are_invalid_html (test_html.HTML.test_charset_conflicts_are_invalid_html) ... ok
+test_taxonomy_consecutive_422_cascade_and_state_loss (test_adversarial_agy.TaxonomyAdversarial.test_taxonomy_consecutive_422_cascade_and_state_loss)
+A second 422 preserves earlier choices for fields it does not invalidate. ... ok
+test_422_preserves_confirmed_title_time_and_project (test_p6_regressions.P6Client.test_422_preserves_confirmed_title_time_and_project) ... ok
+test_422_invalidates_choices_for_the_changed_field (test_p6_regressions.P6Client.test_422_invalidates_choices_for_the_changed_field) ... ok
+test_resume_422_preserves_choices_from_pending (test_p6_regressions.P6Client.test_resume_422_preserves_choices_from_pending) ... ok
+test_external_urls_with_control_characters_are_not_collected (test_html.HTML.test_external_urls_with_control_characters_are_not_collected) ... ok
+test_external_control_characters_never_reach_text_report (test_p6_regressions.P6Client.test_external_control_characters_never_reach_text_report) ... ok
+test_deep_confirmation_json_returns_exit_2 (test_p6_regressions.P6Client.test_deep_confirmation_json_returns_exit_2) ... ok
+test_deep_saved_plan_json_returns_exit_2 (test_p6_regressions.P6Client.test_deep_saved_plan_json_returns_exit_2) ... ok
+test_deep_pending_meta_and_request_return_exit_4 (test_p6_regressions.P6Client.test_deep_pending_meta_and_request_return_exit_4) ... ok
+test_resume_and_dry_run_are_rejected_before_credentials (test_p6_regressions.P6Client.test_resume_and_dry_run_are_rejected_before_credentials) ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 1.705s
+
+OK

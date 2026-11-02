@@ -1,0 +1,10 @@
+PASS e2e-dry-run-compliant :: exit=0 posts=0 gets=2 docs_dir=False status=dry_run
+PASS e2e-dry-run-no-pending-manifest :: no .pending and no manifest after dry-run
+PASS e2e-dry-run-notes :: both missing-server-field notes present
+PASS e2e-missing-meta-pause :: exit=3 posts=0 status=needs_confirmation issue_fields=['generated_at', 'model', 'project', 'type'] pending=False
+PASS e2e-missing-meta-no-submit :: posts=0 source_unchanged=True
+PASS e2e-success-trio :: exit=0 posts=1 docid=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa backup=/home/ryan/projects/html-upload/tmpo8snggl5/docs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.html bytes_equal=True manifest_last=uploaded report_headings=True
+PASS e2e-success-source-untouched :: source bytes and mtime unchanged
+PASS e2e-success-no-pending-html :: pending_html=[]
+
+SUMMARY {"total": 8, "failed": []}
