@@ -1,7 +1,7 @@
 """JSON command entry point for the V2 docs client (Python 3.12+)."""
 import argparse
 import base64
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -237,6 +237,66 @@ def replacement_version(api, origin, ident):
     return doc['content_updated_at']
 
 
+def collect_documents(api, query, *, all_pages):
+    items, ids, cursors = [], set(), set()
+    pages = 0
+    while True:
+        page = api.get('/api/v2/documents', query)
+        entries, cursor = page.get('items'), page.get('next_cursor')
+        reason = None
+        if ('next_cursor' not in page or not isinstance(entries, list) or
+                not (cursor is None or isinstance(cursor, str))):
+            reason = '响应格式无效'
+        elif not entries and cursor:
+            reason = '空页仍有游标'
+        elif cursor and cursor in cursors:
+            reason = '游标重复'
+        else:
+            page_ids = []
+            for entry in entries:
+                if not isinstance(entry, dict) or not isinstance(entry.get('id'), str):
+                    reason = '文档格式无效'
+                    break
+                page_ids.append(entry['id'])
+            if ids.intersection(page_ids) or len(page_ids) != len(set(page_ids)):
+                reason = '文档 ID 重复'
+        if reason:
+            return items, page, '服务端分页异常（' + reason + '），已停止，结果不完整'
+        items.extend(entries)
+        ids.update(page_ids)
+        pages += 1
+        if not all_pages or not cursor:
+            break
+        if pages >= MAX_LIST_PAGES:
+            return items, page, '已达到 1000 页安全上限，已停止，结果不完整；请缩小筛选范围后重试。'
+        cursors.add(cursor)
+        query = [(k, v) for k, v in query if k != 'cursor'] + [('cursor', cursor)]
+    return items, page, None
+
+
+def find_pending_upload(api, meta, raw, origin):
+    uploaded_from = datetime.fromtimestamp(meta['prepared_at'] - 48 * 3600, timezone.utc)
+    query = [('sort', 'uploaded_desc'), ('limit', '50'), ('q', meta['title']),
+             ('uploaded_from', uploaded_from.isoformat().replace('+00:00', 'Z'))]
+    items, _, problem = collect_documents(api, query, all_pages=True)
+    if problem:
+        raise local.Stop(problem)
+    size = len(base64.b64decode(json.loads(raw)['html_base64'], validate=True))
+    match = None
+    # A match is conclusive only after the entire list was read and validated.
+    for doc in items:
+        try:
+            ident = fields.clean_doc_id(doc['id'])
+        except fields.FieldError:
+            raise local.Stop('服务端清单文档格式无效；查找结果不完整') from None
+        if (not metadata_valid(doc, origin, ident) or type(doc.get('size_bytes')) is not int
+                or doc['size_bytes'] < 0):
+            raise local.Stop('服务端清单文档格式无效；查找结果不完整')
+        if match is None and doc['title'] == meta['title'] and doc['size_bytes'] == size:
+            match = doc
+    return match
+
+
 def manage(api, args, body, origin):
     command = args.command
     if command == 'list':
@@ -245,39 +305,10 @@ def manage(api, args, body, origin):
             if value is not None:
                 query.append((name, value))
         query.extend(('tag', tag) for tag in args.tag)
-        items, ids, cursors = [], set(), set()
-        pages = 0
-        while True:
-            page = api.get('/api/v2/documents', query)
-            entries, cursor = page.get('items'), page.get('next_cursor')
-            reason = None
-            if not isinstance(entries, list) or not (cursor is None or isinstance(cursor, str)):
-                reason = '响应格式无效'
-            elif not entries and cursor:
-                reason = '空页仍有游标'
-            elif cursor and cursor in cursors:
-                reason = '游标重复'
-            else:
-                page_ids = []
-                for entry in entries:
-                    if not isinstance(entry, dict) or not isinstance(entry.get('id'), str):
-                        reason = '文档格式无效'
-                        break
-                    page_ids.append(entry['id'])
-                if ids.intersection(page_ids) or len(page_ids) != len(set(page_ids)):
-                    reason = '文档 ID 重复'
-            if reason:
-                return 2, 'failed', dict(items=items, count=len(items)), '服务端分页异常（' + reason + '），已停止，结果不完整'
-            items.extend(entries)
-            ids.update(page_ids)
-            pages += 1
-            if not args.all or not cursor:
-                break
-            if pages >= MAX_LIST_PAGES:
-                return (2, 'failed', dict(items=items, count=len(items)),
-                        '已达到 1000 页安全上限，已停止，结果不完整；请缩小筛选范围后重试。')
-            cursors.add(cursor)
-            query = [(k, v) for k, v in query if k != 'cursor'] + [('cursor', cursor)]
+        items, page, problem = collect_documents(api, query, all_pages=args.all)
+        if problem:
+            return 2, 'failed', dict(items=items, count=len(items)), problem
+        cursor = page['next_cursor']
         report = '共 ' + str(len(items)) + ' 篇'
         report += ''.join('\n' + str(d.get('title', '')) + '：' + str(d.get('url', '')) for d in items[:50])
         if not args.all and cursor:
@@ -413,7 +444,7 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             if pending_meta['op'] == 'replace' and not content_version_valid(pending_meta.get('content_updated_at')):
                 raise local.Stop('替换档案缺少有效的准备时正文版本，无法安全补发；请用 get 核对当前状态，需要时重新执行 replace')
             meta = pending_meta
-            if clock() >= meta['prepared_at'] + 86400:
+            if meta['op'] != 'upload' and clock() >= meta['prepared_at'] + 86400:
                 raise local.Stop('超过 24 小时，服务端已不记得这次请求，不会自动重发；请先用 list 核对是否已经上传成功', code=4)
 
         def capture(*a, **kw):
@@ -470,29 +501,37 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                     store.finalize(home, meta, clock(), error='superseded', check=check_secret)
                     raise local.Stop('这篇文档在准备这次替换之后被改动过（可能正是这次替换已经生效，也可能是之后的另一次替换）。'
                                      '为避免覆盖较新的内容，不再补发；请用 get 查看当前状态，需要时重新执行 replace')
+            found = (preflight(lambda: find_pending_upload(api, meta, raw, origin))
+                     if command == 'resume' and op == 'upload' else None)
             path = '/api/v2/documents' if op == 'upload' else '/api/v2/documents/' + doc_id + '/content'
             try:
-                remote_status, value, headers = api.send_idempotent(
-                    'POST' if op == 'upload' else 'PUT', path, raw, meta['idempotency_key'],
-                    unknown=command == 'resume')
-                if 200 <= remote_status < 300:
-                    if not trusted(value, origin, doc_id):
-                        raise client.RemoteUnknown()
-                    store.finalize(home, meta, clock(), doc=value, check=check_secret)
-                    code, status, data = 0, 'success', value
-                    report = success_report(value, op, remote_status,
-                                            duplicate_hint=command != 'resume' and api.idempotent_attempts == 1)
-                elif 400 <= remote_status < 500 or remote_status == 507:
-                    data = error_data(remote_status, value)
-                    report = client.describe(remote_status, value, headers)
-                    try:
-                        store.finalize(home, meta, clock(), error=data['error'], check=check_secret)
-                    except local.Stop:
-                        report += '；本地记录失败，远程已明确拒绝，请核对本地档案'
-                    if op == 'upload' and remote_status == 404:
-                        report = '24 小时内用完全相同的内容和参数上传过一次，那篇文档已经删除。确实要重新上传，加 --new'
+                if found is not None:
+                    store.finalize(home, meta, clock(), doc=found, check=check_secret)
+                    code, status, data = 0, 'success', found
+                    report = ('链接：' + found['url'] + '\n对方需登录且在分享范围内才能打开。'
+                              '\n补发前在清单里找到了同一篇，没有重复发送')
                 else:
-                    raise client.RemoteUnknown()
+                    remote_status, value, headers = api.send_idempotent(
+                        'POST' if op == 'upload' else 'PUT', path, raw, meta['idempotency_key'],
+                        unknown=command == 'resume')
+                    if 200 <= remote_status < 300:
+                        if not trusted(value, origin, doc_id):
+                            raise client.RemoteUnknown()
+                        store.finalize(home, meta, clock(), doc=value, check=check_secret)
+                        code, status, data = 0, 'success', value
+                        report = success_report(value, op, remote_status,
+                                                duplicate_hint=command != 'resume' and api.idempotent_attempts == 1)
+                    elif 400 <= remote_status < 500 or remote_status == 507:
+                        data = error_data(remote_status, value)
+                        report = client.describe(remote_status, value, headers)
+                        try:
+                            store.finalize(home, meta, clock(), error=data['error'], check=check_secret)
+                        except local.Stop:
+                            report += '；本地记录失败，远程已明确拒绝，请核对本地档案'
+                        if op == 'upload' and remote_status == 404:
+                            report = '24 小时内用完全相同的内容和参数上传过一次，那篇文档已经删除。确实要重新上传，加 --new'
+                    else:
+                        raise client.RemoteUnknown()
             except client.RemoteUnknown:
                 raise local.Stop('写操作结果未知', code=4) from None
     except (local.Stop, fields.FieldError, OSError, UnicodeError) as error:

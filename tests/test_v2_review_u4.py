@@ -72,6 +72,9 @@ class ReplayReportTests(unittest.TestCase):
         self.fake.fail_next = ['lost'] + ['network'] * 5
         code, pending = self.upload()
         self.assertEqual(code, 4)
+        # The current title no longer matches U5's list query; the original
+        # idempotency response still exercises U4's resume -> 200 report.
+        next(iter(self.fake.docs.values()))['title'] = '已改名的文档'
         code, result = self.cli('resume', pending['data']['client_upload_id'])
         self.assert_recovered(code, result)
         self.assertEqual(self.write_statuses, [200])

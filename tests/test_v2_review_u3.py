@@ -159,7 +159,10 @@ class UnknownOutcomeTests(unittest.TestCase):
         code, result = self.cli('resume', ident, transport=transport)
         self.assert_unknown(code, result, ident)
         self.assertEqual(self.event_count(), events + 1)
-        self.assertEqual([c['method'] for c in self.fake.calls[calls:]], ['GET'])
+        # U5 completes its required read-only lookup even after /me crosses
+        # the deadline; the archive and no-write guarantees still apply.
+        self.assertEqual([(c['method'], c['path']) for c in self.fake.calls[calls:]],
+                         [('GET', '/api/v2/me'), ('GET', '/api/v2/documents')])
 
     def test_untrusted_success_retains_unknown_archive(self):
         def transport(*args):
