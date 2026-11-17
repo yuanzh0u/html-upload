@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import secrets
 import stat
+import sys
 from local import Stop, private_read, secure_directory
 from fields import clean_doc_id
 
@@ -32,14 +33,38 @@ def sync_dir(path):
         os.close(fd)
 
 
+def discard_created(paths):
+    """Best-effort rollback of files this operation successfully created."""
+    for path in reversed(paths):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    for parent in {path.parent for path in paths}:
+        try:
+            sync_dir(parent)
+        except OSError:
+            pass
+
+
 def exclusive_write(path, data):
+    # An O_EXCL collision never gives this call ownership of the existing file.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, 'wb') as stream:
-        os.fchmod(stream.fileno(), 0o600)
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
-    sync_dir(path.parent)
+    try:
+        try:
+            stream = os.fdopen(fd, 'wb')
+        except BaseException:
+            os.close(fd)
+            raise
+        with stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        sync_dir(path.parent)
+    except BaseException:
+        discard_created([path])
+        raise
 
 
 def replace_json(path, value):
@@ -53,8 +78,8 @@ def replace_json(path, value):
             temporary.unlink()
 
 
-def checked_fd(path, flags):
-    fd = os.open(path, flags | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+def checked_fd(path, flags, *, create=True):
+    fd = os.open(path, flags | (os.O_CREAT if create else 0) | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.geteuid():
         os.close(fd)
@@ -113,11 +138,47 @@ def record(home, meta, status, now, *, doc=None, error=None, check=None):
             if stream.tell():
                 stream.seek(-1, os.SEEK_END)
                 if stream.read(1) != b'\n':
-                    raise OSError('manifest 尾行不完整')
+                    stream.write(b'\n')
+                    print('警告：manifest 尾行不完整，已补换行后继续记录。', file=sys.stderr)
             stream.write(canonical(row) + b'\n')
             stream.flush()
             os.fsync(stream.fileno())
         sync_dir(root)
+
+
+def read_manifest(home):
+    """Read intact event rows under the writer lock; never initialize history."""
+    root = Path(home) / ROOT
+    try:
+        if not root.exists():
+            return []
+        root = directories(home)
+        path = root / 'manifest.jsonl'
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return []
+        with file_lock(root / '.manifest.lock'):
+            try:
+                fd = checked_fd(path, os.O_RDONLY, create=False)
+            except FileNotFoundError:
+                return []
+            rows = []
+            with os.fdopen(fd, 'rb') as stream:
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, RecursionError):
+                        continue
+                    if (isinstance(row, dict) and row.get('schema_version') == 2
+                            and row.get('op') in ('upload', 'replace')
+                            and row.get('status') in STATUSES
+                            and isinstance(row.get('client_upload_id'), str)
+                            and HEX_ID.fullmatch(row['client_upload_id'])):
+                        rows.append(row)
+            return rows
+    except (OSError, Stop):
+        raise Stop('本地记录无法安全读取；请核对本地记录', code=4) from None
 
 
 def prepare(home, op, doc_id, raw, sha256, idem, now, *, title, origin=None, content_updated_at=None, check=None):
@@ -128,14 +189,20 @@ def prepare(home, op, doc_id, raw, sha256, idem, now, *, title, origin=None, con
         check(meta)
         check(canonical(meta))
         check(raw)
+    created = []
     try:
         root = directories(home, True)
         stem = root / '.pending' / meta['client_upload_id']
-        exclusive_write(stem.with_suffix('.request.json'), raw)
-        exclusive_write(stem.with_suffix('.meta.json'), canonical(meta))
+        for suffix, value in (('.request.json', raw), ('.meta.json', meta)):
+            path = stem.with_suffix(suffix)
+            exclusive_write(path, canonical(value) if suffix == '.meta.json' else value)
+            created.append(path)
         record(home, meta, 'prepared', now, check=check)
-    except (OSError, Stop):
-        raise Stop('本地预备份失败；请求没有发出', code=5) from None
+    except BaseException as exc:
+        discard_created(created)
+        if isinstance(exc, Exception):
+            raise Stop('本地预备份失败；请求没有发出', code=5) from None
+        raise
     return meta
 
 
