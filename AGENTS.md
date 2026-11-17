@@ -35,7 +35,10 @@
 - **每完成一个任务：**
   1. 做一个提交，标题沿用实施计划里给的提交信息；
   2. `git push`；
-  3. 用 `gh pr edit --body` 勾掉清单里对应的任务。
+  3. 勾掉清单里对应的任务。本机的 gh 2.45 执行 `gh pr edit` 会报「Projects (classic) is being deprecated」，所以改用 REST 接口：
+     - 用 `gh pr view <PR 号> --json body -q .body > <文件>` 取出正文；
+     - 把对应任务的 `- [ ]` 改成 `- [x]`；
+     - 用 `gh api -X PATCH repos/yuanzh0u/html-upload/pulls/<PR 号> -F body=@<文件>` 写回。
 - **全部完成：**
   1. 运行 `gh pr ready`；
   2. 在 PR 里发一条评论，汇总：
