@@ -219,6 +219,23 @@ def metadata_valid(doc, origin, ident):
         return False
 
 
+def content_version_valid(value):
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        stamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return stamp.tzinfo is not None and stamp.utcoffset() is not None
+    except ValueError:
+        return False
+
+
+def replacement_version(api, origin, ident):
+    doc = api.get('/api/v2/documents/' + ident)
+    if not metadata_valid(doc, origin, ident) or not content_version_valid(doc.get('content_updated_at')):
+        raise local.Stop('服务端元数据缺少有效的正文版本；停止替换，请用 get 核对')
+    return doc['content_updated_at']
+
+
 def manage(api, args, body, origin):
     command = args.command
     if command == 'list':
@@ -392,6 +409,8 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                 raise local.Stop(KEY_CONTENT)
             if pending_meta.get('origin') != origin:
                 raise local.Stop('补发站点与档案记录不一致，或档案未记录站点；请在原来的环境里补发')
+            if pending_meta['op'] == 'replace' and not content_version_valid(pending_meta.get('content_updated_at')):
+                raise local.Stop('替换档案缺少有效的准备时正文版本，无法安全补发；请用 get 核对当前状态，需要时重新执行 replace')
             meta = pending_meta
             if clock() >= meta['prepared_at'] + 86400:
                 raise local.Stop('超过 24 小时，服务端已不记得这次请求，不会自动重发；请先用 list 核对是否已经上传成功', code=4)
@@ -431,8 +450,15 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             if command != 'resume':
                 idem = (client.idempotency_key(raw, secrets.token_hex(16) if args.new else '')
                         if command == 'upload' else secrets.token_hex(16))
-                meta = store.prepare(home, command, doc_id, raw, body['sha256'], idem, clock(), title=title, origin=origin, check=check_secret)
+                version = replacement_version(api, origin, doc_id) if command == 'replace' else None
+                meta = store.prepare(home, command, doc_id, raw, body['sha256'], idem, clock(),
+                                     title=title, origin=origin, content_updated_at=version, check=check_secret)
             op, doc_id = meta['op'], meta['doc_id']
+            if command == 'resume' and op == 'replace':
+                if replacement_version(api, origin, doc_id) != meta['content_updated_at']:
+                    store.finalize(home, meta, clock(), error='superseded', check=check_secret)
+                    raise local.Stop('这篇文档在准备这次替换之后被改动过（可能正是这次替换已经生效，也可能是之后的另一次替换）。'
+                                     '为避免覆盖较新的内容，不再补发；请用 get 查看当前状态，需要时重新执行 replace')
             path = '/api/v2/documents' if op == 'upload' else '/api/v2/documents/' + doc_id + '/content'
             try:
                 remote_status, value, headers = api.send_idempotent('POST' if op == 'upload' else 'PUT', path, raw, meta['idempotency_key'])

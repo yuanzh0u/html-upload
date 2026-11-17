@@ -145,7 +145,7 @@ class ResumeIdRegressionTests(unittest.TestCase):
                                    'DOCS_ORIGIN': fake.origin}, out=out, clock=lambda: 1800000000,
                                    transport=fake.transport, sleep=lambda _: None)
                 return code, json.loads(out.getvalue())
-            fake.fail_next = ['lost'] + ['network'] * 5
+            fake.fail_next = ['network'] * 6
             code, result = cli(['replace', 'Ab_9-x', str(page), '--summary', '测试'])
             self.assertEqual(code, 4)
             ident = result['data']['client_upload_id']
