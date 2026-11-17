@@ -43,11 +43,13 @@
 
 准备档案元数据包括 client_upload_id、op、doc_id、idempotency_key、sha256、title、prepared_at（Unix 时间秒）、origin（准备请求时的目标站点）、content_updated_at（替换在准备之前查询的正文版本；上传为 null）。request.json 保存完整原请求字节，不得手工编辑或重新序列化。
 
+可信 HTTP 成功结果与补发前清单命中均先将 `success: {id, url, title}` 原子写入原 meta（同目录 0600 临时文件、fsync、replace、目录 fsync），再追加 uploaded/replaced 事件。只持久化这三个结果字段，不把完整服务端响应或 Key 存入 meta。写入成功元数据或 manifest 失败时退出 4；data 保留已知文档结果和 client_upload_id、resume_command，report 给出 ID，并写「文档已经上传成功：<url>；本地记录没写进去，用 resume 补记」。远端成功已确定，不再追加误导的 remote_unknown 事件。成功元数据本身未落盘时保留原档案，下一次 resume 仍需按正常恢复规则查询核对。
+
 ## 档案删除与 resume
 
 成功或从未出现未知尝试的远端明确拒绝后，先追加确定事件，再删除两份 pending 档案；无长期正文副本。结果未知或远端成功但本地记录失败时保留档案用于恢复。若清理文件失败可能残留档案；残留不表示远端失败，也不要据此重复上传。manifest 只追加，不随成功删除。
 
-使用输出中的 `python3 bin/docsctl.py resume CLIENT_UPLOAD_ID`；恢复会先核对档案记录的 origin 与当前站点。站点不一致、缺失或为空时，退出 2，提示「请在原来的环境里补发」，不联网并保留档案；不要手工补填或修改 origin。恢复会检查档案完整性；上传补发先查询清单（q 为标题，uploaded_from 为 prepared_at 往前 48 小时的 UTC 时间），沿用 list --all 的分页校验和 1000 页上限，必须读完全部页。标题完全相同且 size_bytes 等于解码后 HTML 正文字节数时，当作已经上传，记 uploaded、删除两份档案、退出 0，报告「链接：<url>」与「补发前在清单里找到了同一篇，没有重复发送」，不发送 POST；data 为清单元数据，不含分享报告，不推断当前分享范围。查询失败、分页异常或到达页数上限仍未完整读取时，记 remote_unknown、退出 4，保留档案、client_upload_id 和 resume_command，不得继续发送。查无匹配才在原期限内重发完全相同的字节和原幂等键。档案缺失或被改动退出 4，停止并核对，不从源文件重建档案。
+使用输出中的 `python3 bin/docsctl.py resume CLIENT_UPLOAD_ID`；恢复会先核对档案记录的 origin 与当前站点。站点不一致、缺失或为空时，退出 2，提示「请在原来的环境里补发」，不联网并保留档案；不要手工补填或修改 origin。恢复会先检查私有元数据、当前 Key 与 success 的 ID/链接/标题。meta 已有可信 success 时，不受补发期限影响，只在本地追加 uploaded/replaced 并清理档案；不联网，不查账户、清单、正文版本，不重发，请求文件已经缺失也可完成。离线成功 data 仅含 id、url、title，report 给出链接与补记说明，不推断分享或到期状态。否则恢复会检查完整请求档案；上传补发先查询清单（q 为标题，uploaded_from 为 prepared_at 往前 48 小时的 UTC 时间），沿用 list --all 的分页校验和 1000 页上限，必须读完全部页。标题完全相同且 size_bytes 等于解码后 HTML 正文字节数时，当作已经上传，记 uploaded、删除两份档案、退出 0，报告「链接：<url>」与「补发前在清单里找到了同一篇，没有重复发送」，不发送 POST；data 为清单元数据，不含分享报告，不推断当前分享范围。查询失败、分页异常或到达页数上限仍未完整读取时，记 remote_unknown、退出 4，保留档案、client_upload_id 和 resume_command，不得继续发送。查无匹配才在原期限内重发完全相同的字节和原幂等键。档案缺失或被改动退出 4，停止并核对，不从源文件重建档案。
 
 替换在准备档案前先读取文档元数据，保存当时的 content_updated_at。补发替换前再次读取；与档案不一致时，记 failed、error=superseded，删除两份档案，退出 2，不发送替换请求。报告为：
 

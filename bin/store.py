@@ -139,6 +139,35 @@ def prepare(home, op, doc_id, raw, sha256, idem, now, *, title, origin=None, con
     return meta
 
 
+def success_valid(meta, *, check_origin=True):
+    doc = meta['success']
+    return (isinstance(doc, dict) and set(doc) == {'id', 'url', 'title'}
+            and clean_doc_id(doc['id']) == doc['id']
+            and (meta['doc_id'] is None or doc['id'] == meta['doc_id'])
+            and isinstance(doc['url'], str)
+            and (not check_origin or (isinstance(meta.get('origin'), str)
+                 and doc['url'] == meta['origin'] + '/d/' + doc['id']))
+            and isinstance(doc['title'], str))
+
+
+def remember_success(home, meta, doc, *, check=None):
+    """Atomically retain the minimal trusted outcome before appending history."""
+    saved = dict(meta, success={key: doc[key] for key in ('id', 'url', 'title')})
+    if check is not None:
+        check(saved)
+        check(canonical(saved))
+    try:
+        if not success_valid(saved):
+            raise ValueError()
+        root = directories(home)
+        path = root / '.pending' / (meta['client_upload_id'] + '.meta.json')
+        private_read(path, 16385)  # Refuse unsafe existing metadata before replacement.
+        replace_json(path, saved)
+    except (OSError, Stop, ValueError, TypeError, KeyError):
+        raise Stop('成功结果的本地记录失败；请用 resume 补记', code=4) from None
+    meta.update(success=saved['success'])
+
+
 def finalize(home, meta, now, *, doc=None, error=None, check=None):
     try:
         record(home, meta, ('uploaded' if meta['op'] == 'upload' else 'replaced') if doc is not None else 'failed',
@@ -148,22 +177,20 @@ def finalize(home, meta, now, *, doc=None, error=None, check=None):
     try:
         root = directories(home)
         for suffix in ('.request.json', '.meta.json'):
-            (root / '.pending' / (meta['client_upload_id'] + suffix)).unlink()
+            (root / '.pending' / (meta['client_upload_id'] + suffix)).unlink(missing_ok=True)
         sync_dir(root / '.pending')
     except (OSError, Stop):
         pass
 
 
-def load_pending(home, client_id):
+def load_pending(home, client_id, *, allow_success=False):
     try:
         if not isinstance(client_id, str) or HEX_ID.fullmatch(client_id) is None:
             raise ValueError()
         root = directories(home)
         pending = root / '.pending'
         meta = json.loads(private_read(pending / (client_id + '.meta.json'), 16385))
-        raw = private_read(pending / (client_id + '.request.json'), MAX_BODY + 1)
-        body = json.loads(raw)
-        if not isinstance(meta, dict) or not isinstance(body, dict) or len(raw) > MAX_BODY:
+        if not isinstance(meta, dict):
             raise ValueError()
         if (meta['client_upload_id'] != client_id or meta['op'] not in ('upload', 'replace')
                 or (meta['op'] == 'upload' and meta['doc_id'] is not None)
@@ -173,6 +200,15 @@ def load_pending(home, client_id):
                 or not isinstance(meta['title'], str) or not 1 <= len(meta['title']) <= 200
                 or type(meta['prepared_at']) not in (int, float) or not math.isfinite(meta['prepared_at'])
                 or not isinstance(meta['sha256'], str) or re.fullmatch(r'[0-9a-f]{64}', meta['sha256']) is None):
+            raise ValueError()
+        if 'success' in meta:
+            if not success_valid(meta, check_origin=not allow_success):
+                raise ValueError()
+            if allow_success:
+                return meta, None
+        raw = private_read(pending / (client_id + '.request.json'), MAX_BODY + 1)
+        body = json.loads(raw)
+        if not isinstance(body, dict) or len(raw) > MAX_BODY:
             raise ValueError()
         data = base64.b64decode(body['html_base64'], validate=True)
         if (not 1 <= len(data) <= 2_097_152 or hashlib.sha256(data).hexdigest() != body['sha256']

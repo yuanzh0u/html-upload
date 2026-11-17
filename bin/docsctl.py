@@ -360,6 +360,14 @@ def manage(api, args, body, origin):
         raise local.Stop(f'结果未知，请用 python3 bin/docsctl.py get {ident} 核对', code=4) from None
 
 
+def local_record_failure(meta, doc):
+    resume = 'python3 bin/docsctl.py resume ' + meta['client_upload_id']
+    data = dict(doc, client_upload_id=meta['client_upload_id'], resume_command=resume)
+    report = ('文档已经上传成功：' + doc['url'] + '；本地记录没写进去，用 resume 补记'
+              + '\n文档 ID：' + doc['id'] + '\n' + resume)
+    return 4, 'remote_unknown', data, report
+
+
 def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng=random.uniform, transport=None):
     env = os.environ if env is None else env
     out = sys.stdout if out is None else out
@@ -371,6 +379,7 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
     meta = None
     last = None
     write_sent = False
+    known_success = None
     code, status, data, report = 2, 'failed', error_data(), ''
     try:
         parser = build_parser()
@@ -434,135 +443,159 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             if len(raw) > fields.MAX_BODY:
                 raise local.Stop('JSON 请求体超过大小上限')
         elif command == 'resume':
-            pending_meta, raw = store.load_pending(home, args.client_upload_id)
-            archived = json.loads(raw)
-            if (contains_key(pending_meta, token) or contains_key(raw, token) or contains_key(archived, token) or
-                    contains_key(base64.b64decode(archived['html_base64']), token)):
-                raise local.Stop(KEY_CONTENT)
+            pending_meta, raw = store.load_pending(home, args.client_upload_id, allow_success=True)
+            check_secret(pending_meta)
+            check_secret(store.canonical(pending_meta))
+            if raw is not None:
+                archived = json.loads(raw)
+                if (contains_key(raw, token) or contains_key(archived, token) or
+                        contains_key(base64.b64decode(archived['html_base64']), token)):
+                    raise local.Stop(KEY_CONTENT)
             if pending_meta.get('origin') != origin:
                 raise local.Stop('补发站点与档案记录不一致，或档案未记录站点；请在原来的环境里补发')
-            if pending_meta['op'] == 'replace' and not content_version_valid(pending_meta.get('content_updated_at')):
+            if 'success' in pending_meta and not store.success_valid(pending_meta):
+                raise local.Stop('恢复档案缺失或被改动；停止，请核对本地档案', code=4)
+            if ('success' not in pending_meta and pending_meta['op'] == 'replace'
+                    and not content_version_valid(pending_meta.get('content_updated_at'))):
                 raise local.Stop('替换档案缺少有效的准备时正文版本，无法安全补发；请用 get 核对当前状态，需要时重新执行 replace')
             meta = pending_meta
-            if meta['op'] != 'upload' and clock() >= meta['prepared_at'] + 86400:
+            if 'success' in meta:
+                known_success = meta['success']
+                store.finalize(home, meta, clock(), doc=known_success, check=check_secret)
+                code, status, data = 0, 'success', known_success
+                report = '链接：' + known_success['url'] + '\n对方需登录且在分享范围内才能打开。\n已补记本地成功记录'
+            elif meta['op'] != 'upload' and clock() >= meta['prepared_at'] + 86400:
                 raise local.Stop('超过 24 小时，服务端已不记得这次请求，不会自动重发；请先用 list 核对是否已经上传成功', code=4)
 
-        def capture(*a, **kw):
-            nonlocal last, write_sent
-            last = None
-            # Inspect the exact wire representation as well as decoded URL
-            # values. Never redact or reserialize an idempotent request.
-            from urllib.parse import unquote_plus
-            check_secret(a[1])
-            check_secret(unquote_plus(a[1]))
-            if len(a) > 3:
-                check_secret(a[3])
-            if len(a) > 4:
-                check_secret(a[4])
-                # /me, retries and backoff may have consumed the remaining
-                # lifetime. Guard every content attempt at the dispatch boundary.
-                if meta is not None and clock() >= meta['prepared_at'] + 86400:
-                    raise local.Stop('超过 24 小时，服务端已不记得这次请求，不会自动重发；请先用 list 核对是否已经上传成功', code=4)
-            if a[0] != 'GET':
-                write_sent = True
-            result = (transport or client.http_request)(*a, **kw)
-            result = tuple(redact(v, token) for v in result)
-            last = result
-            return result
+        if known_success is None:
+            def capture(*a, **kw):
+                nonlocal last, write_sent
+                last = None
+                # Inspect the exact wire representation as well as decoded URL
+                # values. Never redact or reserialize an idempotent request.
+                from urllib.parse import unquote_plus
+                check_secret(a[1])
+                check_secret(unquote_plus(a[1]))
+                if len(a) > 3:
+                    check_secret(a[3])
+                if len(a) > 4:
+                    check_secret(a[4])
+                    # /me, retries and backoff may have consumed the remaining
+                    # lifetime. Guard every content attempt at the dispatch boundary.
+                    if meta is not None and clock() >= meta['prepared_at'] + 86400:
+                        raise local.Stop('超过 24 小时，服务端已不记得这次请求，不会自动重发；请先用 list 核对是否已经上传成功', code=4)
+                if a[0] != 'GET':
+                    write_sent = True
+                result = (transport or client.http_request)(*a, **kw)
+                result = tuple(redact(v, token) for v in result)
+                last = result
+                return result
 
-        api = client.Client(origin, token, transport=capture, sleep=sleep, rng=rng)
+            api = client.Client(origin, token, transport=capture, sleep=sleep, rng=rng)
 
-        def preflight(read):
-            try:
-                return read()
-            except local.Stop as error:
-                if command == 'resume' and meta is not None:
-                    raise local.Stop(error.message + '；先前写操作结果仍未知', code=4) from None
-                raise
+            def preflight(read):
+                try:
+                    return read()
+                except local.Stop as error:
+                    if command == 'resume' and meta is not None:
+                        raise local.Stop(error.message + '；先前写操作结果仍未知', code=4) from None
+                    raise
 
-        me = preflight(api.me)
-        if command == 'me':
-            data = me
-            report = f'今日已用 {me["daily_upload_used"]}/{me["daily_upload_limit"]} 次'
-            code, status = 0, 'success'
-        elif command in MANAGE:
-            code, status, data, report = manage(api, args, body, origin)
-        else:
-            if command != 'resume':
-                idem = (client.idempotency_key(raw, secrets.token_hex(16) if args.new else '')
-                        if command == 'upload' else secrets.token_hex(16))
-                version = replacement_version(api, origin, doc_id) if command == 'replace' else None
-                meta = store.prepare(home, command, doc_id, raw, body['sha256'], idem, clock(),
-                                     title=title, origin=origin, content_updated_at=version, check=check_secret)
-            op, doc_id = meta['op'], meta['doc_id']
-            if command == 'resume' and op == 'replace':
-                current_version = preflight(lambda: replacement_version(api, origin, doc_id))
-                if current_version != meta['content_updated_at']:
-                    store.finalize(home, meta, clock(), error='superseded', check=check_secret)
-                    raise local.Stop('这篇文档在准备这次替换之后被改动过（可能正是这次替换已经生效，也可能是之后的另一次替换）。'
-                                     '为避免覆盖较新的内容，不再补发；请用 get 查看当前状态，需要时重新执行 replace')
-            found = (preflight(lambda: find_pending_upload(api, meta, raw, origin))
-                     if command == 'resume' and op == 'upload' else None)
-            path = '/api/v2/documents' if op == 'upload' else '/api/v2/documents/' + doc_id + '/content'
-            try:
-                if found is not None:
-                    store.finalize(home, meta, clock(), doc=found, check=check_secret)
-                    code, status, data = 0, 'success', found
-                    report = ('链接：' + found['url'] + '\n对方需登录且在分享范围内才能打开。'
-                              '\n补发前在清单里找到了同一篇，没有重复发送')
-                else:
-                    remote_status, value, headers = api.send_idempotent(
-                        'POST' if op == 'upload' else 'PUT', path, raw, meta['idempotency_key'],
-                        unknown=command == 'resume')
-                    if 200 <= remote_status < 300:
-                        if not trusted(value, origin, doc_id):
-                            raise client.RemoteUnknown()
-                        store.finalize(home, meta, clock(), doc=value, check=check_secret)
-                        code, status, data = 0, 'success', value
-                        report = success_report(value, op, remote_status,
-                                                duplicate_hint=command != 'resume' and api.idempotent_attempts == 1)
-                    elif 400 <= remote_status < 500 or remote_status == 507:
-                        data = error_data(remote_status, value)
-                        report = client.describe(remote_status, value, headers)
-                        try:
-                            store.finalize(home, meta, clock(), error=data['error'], check=check_secret)
-                        except local.Stop:
-                            report += '；本地记录失败，远程已明确拒绝，请核对本地档案'
-                        if op == 'upload' and remote_status == 404:
-                            report = '24 小时内用完全相同的内容和参数上传过一次，那篇文档已经删除。确实要重新上传，加 --new'
+            me = preflight(api.me)
+            if command == 'me':
+                data = me
+                report = f'今日已用 {me["daily_upload_used"]}/{me["daily_upload_limit"]} 次'
+                code, status = 0, 'success'
+            elif command in MANAGE:
+                code, status, data, report = manage(api, args, body, origin)
+            else:
+                if command != 'resume':
+                    idem = (client.idempotency_key(raw, secrets.token_hex(16) if args.new else '')
+                            if command == 'upload' else secrets.token_hex(16))
+                    version = replacement_version(api, origin, doc_id) if command == 'replace' else None
+                    meta = store.prepare(home, command, doc_id, raw, body['sha256'], idem, clock(),
+                                         title=title, origin=origin, content_updated_at=version, check=check_secret)
+                op, doc_id = meta['op'], meta['doc_id']
+                if command == 'resume' and op == 'replace':
+                    current_version = preflight(lambda: replacement_version(api, origin, doc_id))
+                    if current_version != meta['content_updated_at']:
+                        store.finalize(home, meta, clock(), error='superseded', check=check_secret)
+                        raise local.Stop('这篇文档在准备这次替换之后被改动过（可能正是这次替换已经生效，也可能是之后的另一次替换）。'
+                                         '为避免覆盖较新的内容，不再补发；请用 get 查看当前状态，需要时重新执行 replace')
+                found = (preflight(lambda: find_pending_upload(api, meta, raw, origin))
+                         if command == 'resume' and op == 'upload' else None)
+                path = '/api/v2/documents' if op == 'upload' else '/api/v2/documents/' + doc_id + '/content'
+                try:
+                    if found is not None:
+                        known_success = found
+                        store.remember_success(home, meta, found, check=check_secret)
+                        store.finalize(home, meta, clock(), doc=found, check=check_secret)
+                        known_success = None
+                        code, status, data = 0, 'success', found
+                        report = ('链接：' + found['url'] + '\n对方需登录且在分享范围内才能打开。'
+                                  '\n补发前在清单里找到了同一篇，没有重复发送')
                     else:
-                        raise client.RemoteUnknown()
-            except client.RemoteUnknown:
-                raise local.Stop('写操作结果未知', code=4) from None
+                        remote_status, value, headers = api.send_idempotent(
+                            'POST' if op == 'upload' else 'PUT', path, raw, meta['idempotency_key'],
+                            unknown=command == 'resume')
+                        if 200 <= remote_status < 300:
+                            if not trusted(value, origin, doc_id):
+                                raise client.RemoteUnknown()
+                            known_success = value
+                            store.remember_success(home, meta, value, check=check_secret)
+                            store.finalize(home, meta, clock(), doc=value, check=check_secret)
+                            known_success = None
+                            code, status, data = 0, 'success', value
+                            report = success_report(value, op, remote_status,
+                                                    duplicate_hint=command != 'resume' and api.idempotent_attempts == 1)
+                        elif 400 <= remote_status < 500 or remote_status == 507:
+                            data = error_data(remote_status, value)
+                            report = client.describe(remote_status, value, headers)
+                            try:
+                                store.finalize(home, meta, clock(), error=data['error'], check=check_secret)
+                            except local.Stop:
+                                report += '；本地记录失败，远程已明确拒绝，请核对本地档案'
+                            if op == 'upload' and remote_status == 404:
+                                report = '24 小时内用完全相同的内容和参数上传过一次，那篇文档已经删除。确实要重新上传，加 --new'
+                        else:
+                            raise client.RemoteUnknown()
+                except client.RemoteUnknown:
+                    raise local.Stop('写操作结果未知', code=4) from None
     except (local.Stop, fields.FieldError, OSError, UnicodeError) as error:
-        code = error.code if isinstance(error, local.Stop) else 2
-        status = 'remote_unknown' if code == 4 else 'failed'
-        report = error.message if isinstance(error, local.Stop) else ('本地文件读取失败' if isinstance(error, (OSError, UnicodeError)) else str(error))
-        data = error_data(*(last[:2] if last is not None and not 200 <= last[0] < 300 else (None, None)))
-        if code == 4 and meta is not None:
-            try:
-                store.record(home, meta, 'remote_unknown', clock(), check=check_secret)
-            except Exception:
-                # A failed event append must not hide the recovery information.
-                pass
-            resume = 'python3 bin/docsctl.py resume ' + meta['client_upload_id']
-            data = dict(client_upload_id=meta['client_upload_id'], resume_command=resume)
-            report += '\n' + resume
+        if known_success is not None:
+            code, status, data, report = local_record_failure(meta, known_success)
+        else:
+            code = error.code if isinstance(error, local.Stop) else 2
+            status = 'remote_unknown' if code == 4 else 'failed'
+            report = error.message if isinstance(error, local.Stop) else ('本地文件读取失败' if isinstance(error, (OSError, UnicodeError)) else str(error))
+            data = error_data(*(last[:2] if last is not None and not 200 <= last[0] < 300 else (None, None)))
+            if code == 4 and meta is not None:
+                try:
+                    store.record(home, meta, 'remote_unknown', clock(), check=check_secret)
+                except Exception:
+                    # A failed event append must not hide the recovery information.
+                    pass
+                resume = 'python3 bin/docsctl.py resume ' + meta['client_upload_id']
+                data = dict(client_upload_id=meta['client_upload_id'], resume_command=resume)
+                report += '\n' + resume
     except Exception as error:
-        code = 4 if meta is not None or write_sent else 2
-        status = 'remote_unknown' if code == 4 else 'failed'
-        data = error_data()
-        report = type(error).__name__
-        if meta is not None:
-            try:
-                store.record(home, meta, 'remote_unknown', clock(), check=check_secret)
-            except Exception:
-                pass
-            resume = 'python3 bin/docsctl.py resume ' + meta['client_upload_id']
-            data = dict(client_upload_id=meta['client_upload_id'], resume_command=resume)
-            report += '\n' + resume
-        elif write_sent:
-            report += '\n结果未知，请用 python3 bin/docsctl.py get ' + args.doc_id + ' 核对'
+        if known_success is not None:
+            code, status, data, report = local_record_failure(meta, known_success)
+        else:
+            code = 4 if meta is not None or write_sent else 2
+            status = 'remote_unknown' if code == 4 else 'failed'
+            data = error_data()
+            report = type(error).__name__
+            if meta is not None:
+                try:
+                    store.record(home, meta, 'remote_unknown', clock(), check=check_secret)
+                except Exception:
+                    pass
+                resume = 'python3 bin/docsctl.py resume ' + meta['client_upload_id']
+                data = dict(client_upload_id=meta['client_upload_id'], resume_command=resume)
+                report += '\n' + resume
+            elif write_sent:
+                report += '\n结果未知，请用 python3 bin/docsctl.py get ' + args.doc_id + ' 核对'
     result = dict(ok=code == 0, command=command, status=status, exit_code=code, data=data, report=report)
     # A rejected credential may itself spell the spaced protocol prefix. It
     # is never a redaction pattern; compact formatting avoids that coincidence.
