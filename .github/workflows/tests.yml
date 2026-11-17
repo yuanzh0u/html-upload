@@ -15,8 +15,4 @@ jobs:
         with:
           python-version: '3.12'
       - name: Run all tests
-        # V1 的 test_adversarial_agy 把本机绝对路径写死在 sys.path 里，CI 上找不到 bin/；
-        # U00 删掉 V1 测试后，可以去掉这个 env。
-        env:
-          PYTHONPATH: bin:tests
         run: python3.12 -m unittest discover -s tests
