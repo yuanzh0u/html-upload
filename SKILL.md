@@ -31,13 +31,13 @@ python3 bin/docsctl.py delete DOC_ID
 python3 bin/docsctl.py tags
 ```
 
-上传标题优先使用显式 `--title`，其次为 `hx:title` meta，最后为唯一页面 `<title>`；SVG、MathML 的图题不算页面标题。多个页面 `<title>` 即使同名或存在 meta 也必须提供 `--title`；选中的标题仍需通过标题校验。
+上传标题优先使用显式 `--title`，其次为 `hx:title` meta，最后为唯一页面 `<title>`；SVG、MathML 的图题不算页面标题。多个页面 `<title>` 即使同名或存在 meta 也必须提供 `--title`；标题先合并连续空白并去掉首尾空白，再校验 1–200 字；拒绝剩余 Cc 控制字符、Cs 代理字符、U+202A–U+202E、U+2066–U+2069，以及 U+200B、U+2060、U+FEFF。其他 Cf 字符允许，包括 emoji 的 ZWJ、ZWNJ 与软连字符。
 
 ## 摘要规则
 
 上传、替换必须提供纯文本摘要，目标 100–300 字，硬上限 1000 字（Unicode 字符）；用户给了摘要就用用户的。没有摘要时，依据已有的内容上下文概括用途、主要内容和结论；上下文不足就请用户提供摘要，不通过读取远端正文补齐。
 
-不要照抄页面开头的导航、标题、目录或样板文字；不要写入 Key、手机号等敏感信息。`--summary` 与 UTF-8 的 `--summary-file` 二选一。
+不要照抄页面开头的导航、标题、目录或样板文字；不要写入 Key、手机号等敏感信息。`--summary` 与 UTF-8 的 `--summary-file` 二选一；摘要文件先检查原始字节不含 Key，再把 CRLF 规整为 LF。以 `-` 开头的选项值使用等号，例如 `--summary=-x`。
 
 ## 标签与分享规则
 
@@ -47,7 +47,7 @@ python3 bin/docsctl.py tags
 
 ## 结果转述与退出码
 
-正常调用 stdout 只有一个 JSON 对象：`ok`、`command`、`status`、`exit_code`、`data`、`report`。把 report 原样转述给用户，不要把部分成功说成全部成功。`data` 保留服务端 UTC，report 使用本机时区。错误对应的用户建议查 [错误参考](references/errors.md)。
+正常调用 stdout 只有一个 JSON 对象：`ok`、`command`、`status`、`exit_code`、`data`、`report`。把 report 原样转述给用户，不要把部分成功说成全部成功。`data` 保留服务端 UTC，report 使用本机时区；有效时间在本机转换溢出时显示原始时间字符串，不影响已确认的成功。错误对应的用户建议查 [错误参考](references/errors.md)。
 
 | 退出码 | 含义与 Agent 行动 |
 | --- | --- |
@@ -56,6 +56,8 @@ python3 bin/docsctl.py tags
 | 3 | 删除预览，需要用户确认；未作修改，展示 report 并取得明确同意。 |
 | 4 | 写操作远端结果未知，或远端成功而本地记录失败；上传、替换用输出的 resume 命令恢复；未过期补发档案的账户/当前元数据查询失败也退出 4，保留档案和恢复命令；已过期则按下述作废规则清档，不提供 resume 命令。其他写操作用 get 核对，不盲目重做。 |
 | 5 | 本地预备份失败，请求没有发出；按 report 处理本地问题后再执行。 |
+
+resume 会先安全读取 manifest 中该客户端 ID 的最后一条已定结果，不联网：uploaded/replaced 退出 0 并给出链接，failed/abandoned 退出 2 且不提供补发命令；成功记录仍核对 Key、文档 ID 与当前站点链接。没有已定结果时才按档案规则恢复。
 
 本地 manifest 尾行缺换行时会加锁补换行后继续，并输出不含损坏内容的固定警告；读取跳过损坏行。预备份失败会清理本次创建的文件，保留原有档案；退出 5 表示写请求未发送。
 

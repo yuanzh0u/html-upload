@@ -59,7 +59,7 @@ def canonical(value):
 
 class Parser(argparse.ArgumentParser):
     def error(self, message):
-        raise local.Stop('参数错误，请检查命令和参数')
+        raise local.Stop('参数错误，请检查命令和参数；以 - 开头的选项值请用等号连接，例如 --summary=-x')
 
 
 def build_parser():
@@ -148,8 +148,7 @@ def success_report(doc, op, status, *, duplicate_hint=True):
     if doc.get('favorite') is True:
         lines.append('收藏中，不会过期')
     else:
-        expiry = datetime.fromisoformat(doc['expires_at'].replace('Z', '+00:00')).astimezone()
-        lines.append('到期时间：' + expiry.strftime('%Y-%m-%d %H:%M'))
+        lines.append('到期时间：' + display_time(doc['expires_at']))
     shared, failed = doc['share_report']['shared'], doc['share_report']['failed']
     if failed:
         if shared:
@@ -193,9 +192,8 @@ def manage_options(args):
         if args.command == 'edit':
             if args.title is not None:
                 body['title'] = fields.clean_title(args.title)
-            if args.summary is not None or args.summary_file is not None:
-                summary = args.summary if args.summary_file is None else Path(args.summary_file).read_text(encoding='utf-8')
-                body['summary'] = fields.clean_summary(summary)
+            if args.summary is not None:
+                body['summary'] = fields.clean_summary(args.summary)
             if args.tag is not None or args.clear_tags:
                 body['tags'] = fields.clean_tags(args.tag or [])
             if not body:
@@ -207,7 +205,10 @@ def display_time(value):
     stamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
     if stamp.tzinfo is None:
         raise ValueError('missing timezone')
-    return stamp.astimezone().strftime('%Y-%m-%d %H:%M')
+    try:
+        return stamp.astimezone().strftime('%Y-%m-%d %H:%M')
+    except (OverflowError, OSError, ValueError):
+        return value  # A valid remote timestamp can exceed the local timezone range.
 
 
 def metadata_valid(doc, origin, ident):
@@ -365,6 +366,31 @@ def manage(api, args, body, origin):
         raise local.Stop(f'结果未知，请用 python3 bin/docsctl.py get {ident} 核对', code=4) from None
 
 
+def terminal_resume(home, ident, origin, check):
+    """Report the latest settled event without reopening or resending a request."""
+    if not isinstance(ident, str) or store.HEX_ID.fullmatch(ident) is None:
+        raise local.Stop('恢复档案标识无效；停止，请核对本地档案', code=4)
+    for row in reversed(store.read_manifest(home)):
+        if row['client_upload_id'] != ident or row['status'] not in ('uploaded', 'replaced', 'failed', 'abandoned'):
+            continue
+        check(row)
+        check(store.canonical(row))
+        if row['status'] in ('uploaded', 'replaced'):
+            try:
+                doc_id = fields.clean_doc_id(row['doc_id'])
+                if not isinstance(row['title'], str) or not isinstance(row['url'], str):
+                    raise ValueError()
+            except (fields.FieldError, KeyError, TypeError, ValueError):
+                raise local.Stop('本地成功记录无效；请核对本地记录', code=4) from None
+            if row['url'] != origin + '/d/' + doc_id:
+                raise local.Stop('本地成功记录的站点或链接不符；请在原来的环境里补发')
+            doc = dict(id=doc_id, url=row['url'], title=row['title'])
+            return 0, 'success', doc, '链接：' + doc['url'] + '\n对方需登录且在分享范围内才能打开。\n本地记录已确认成功，无需补发'
+        report = EXPIRED_REPORT if row['status'] == 'abandoned' else '本地记录表明这次请求已失败，不再补发；请用 list/get 核对'
+        return 2, 'failed', dict(client_upload_id=ident), report
+    return None
+
+
 def local_record_failure(meta, doc):
     resume = 'python3 bin/docsctl.py resume ' + meta['client_upload_id']
     data = dict(doc, client_upload_id=meta['client_upload_id'], resume_command=resume)
@@ -403,6 +429,7 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
     last = None
     write_sent = False
     known_success = None
+    terminal_result = None
     recovery = ExitStack()
     code, status, data, report = 2, 'failed', error_data(), ''
     try:
@@ -429,7 +456,7 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             summary_bytes = Path(args.summary_file).read_bytes()
             if contains_key(summary_bytes, token):
                 raise local.Stop(KEY_CONTENT)
-            args.summary = summary_bytes.decode('utf-8')
+            args.summary = summary_bytes.decode('utf-8').replace('\r\n', '\n')
             args.summary_file = None
         if args.command in ('upload', 'replace'):
             html = local.read_html(args.html, forbidden=token)
@@ -444,8 +471,6 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             body = manage_options(args)
         if command in ('upload', 'replace'):
             summary = args.summary
-            if args.summary_file is not None:
-                summary = Path(args.summary_file).read_text(encoding='utf-8')
             summary = fields.clean_summary(summary)
             share = fields.clean_share(args.share_friend, args.share_group)
             if command == 'upload':
@@ -472,31 +497,35 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                 raise local.Stop('JSON 请求体超过大小上限')
         elif command == 'resume':
             recovery.enter_context(store.archive_lock(home, args.client_upload_id))
-            pending_meta, raw = store.load_pending(home, args.client_upload_id, allow_success=True)
-            check_secret(pending_meta)
-            check_secret(store.canonical(pending_meta))
-            if raw is not None:
-                archived = json.loads(raw)
-                if (contains_key(raw, token) or contains_key(archived, token) or
-                        contains_key(base64.b64decode(archived['html_base64']), token)):
-                    raise local.Stop(KEY_CONTENT)
-            if pending_meta.get('origin') != origin:
-                raise local.Stop('补发站点与档案记录不一致，或档案未记录站点；请在原来的环境里补发')
-            if 'success' in pending_meta and not store.success_valid(pending_meta):
-                raise local.Stop('恢复档案缺失或被改动；停止，请核对本地档案', code=4)
-            if ('success' not in pending_meta and pending_meta['op'] == 'replace'
-                    and not content_version_valid(pending_meta.get('content_updated_at'))):
-                raise local.Stop('替换档案缺少有效的准备时正文版本，无法安全补发；请用 get 核对当前状态，需要时重新执行 replace')
-            meta = pending_meta
-            if 'success' in meta:
-                known_success = meta['success']
-                store.finalize(home, meta, clock(), doc=known_success, check=check_secret)
-                code, status, data = 0, 'success', known_success
-                report = '链接：' + known_success['url'] + '\n对方需登录且在分享范围内才能打开。\n已补记本地成功记录'
-            elif meta['op'] != 'upload' and store.expired(meta, clock()):
-                raise local.Stop(EXPIRED_REPORT, code=4)
+            terminal_result = terminal_resume(home, args.client_upload_id, origin, check_secret)
+            if terminal_result is not None:
+                code, status, data, report = terminal_result
+            else:
+                pending_meta, raw = store.load_pending(home, args.client_upload_id, allow_success=True)
+                check_secret(pending_meta)
+                check_secret(store.canonical(pending_meta))
+                if raw is not None:
+                    archived = json.loads(raw)
+                    if (contains_key(raw, token) or contains_key(archived, token) or
+                            contains_key(base64.b64decode(archived['html_base64']), token)):
+                        raise local.Stop(KEY_CONTENT)
+                if pending_meta.get('origin') != origin:
+                    raise local.Stop('补发站点与档案记录不一致，或档案未记录站点；请在原来的环境里补发')
+                if 'success' in pending_meta and not store.success_valid(pending_meta):
+                    raise local.Stop('恢复档案缺失或被改动；停止，请核对本地档案', code=4)
+                if ('success' not in pending_meta and pending_meta['op'] == 'replace'
+                        and not content_version_valid(pending_meta.get('content_updated_at'))):
+                    raise local.Stop('替换档案缺少有效的准备时正文版本，无法安全补发；请用 get 核对当前状态，需要时重新执行 replace')
+                meta = pending_meta
+                if 'success' in meta:
+                    known_success = meta['success']
+                    store.finalize(home, meta, clock(), doc=known_success, check=check_secret)
+                    code, status, data = 0, 'success', known_success
+                    report = '链接：' + known_success['url'] + '\n对方需登录且在分享范围内才能打开。\n已补记本地成功记录'
+                elif meta['op'] != 'upload' and store.expired(meta, clock()):
+                    raise local.Stop(EXPIRED_REPORT, code=4)
 
-        if known_success is None:
+        if known_success is None and terminal_result is None:
             def capture(*a, **kw):
                 nonlocal last, write_sent
                 last = None
@@ -584,12 +613,12 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                         elif 400 <= remote_status < 500 or remote_status == 507:
                             data = error_data(remote_status, value)
                             report = client.describe(remote_status, value, headers)
+                            if op == 'upload' and remote_status == 404:
+                                report = '24 小时内用完全相同的内容和参数上传过一次，那篇文档已经删除。确实要重新上传，加 --new'
                             try:
                                 store.finalize(home, meta, clock(), error=data['error'], check=check_secret)
                             except local.Stop:
                                 report += '；本地记录失败，远程已明确拒绝，请核对本地档案'
-                            if op == 'upload' and remote_status == 404:
-                                report = '24 小时内用完全相同的内容和参数上传过一次，那篇文档已经删除。确实要重新上传，加 --new'
                         else:
                             raise client.RemoteUnknown()
                 except client.RemoteUnknown:

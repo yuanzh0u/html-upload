@@ -23,9 +23,11 @@ class FieldError(ValueError):
 def clean_title(value) -> str:
     if not isinstance(value, str):
         raise FieldError('title', '标题必须是文本')
-    if any(unicodedata.category(c) in {'Cc', 'Cf', 'Cs'} for c in value):
+    value = ' '.join(value.split())
+    if any(unicodedata.category(c) in {'Cc', 'Cs'}
+           or c in '\u200b\u2060\ufeff'
+           or 0x202A <= ord(c) <= 0x202E or 0x2066 <= ord(c) <= 0x2069 for c in value):
         raise FieldError('title', '标题含不允许的控制字符')
-    value = value.strip()
     if not value:
         raise FieldError('title', '标题不能为空')
     if len(value) > MAX_TITLE:

@@ -1,12 +1,12 @@
 # 命令参考
 
-所有命令使用 `python3 bin/docsctl.py`，需要 Python 3.12 以上；不提供 Key 或站点参数。需要联网的业务调用先检查 docs-api 主版本；已有可信 success 的 resume 只做离线补记。`--help` 显示文本帮助且退出 0，不发业务请求。
+所有命令使用 `python3 bin/docsctl.py`，需要 Python 3.12 以上；不提供 Key 或站点参数。需要联网的业务调用先检查 docs-api 主版本；已有可信 success 的 resume 只做离线补记。`--help` 显示文本帮助且退出 0，不发业务请求。以 `-` 开头的选项值须用等号连接，例如 `--summary=-x`；参数错误只给固定提示，不回显参数值。
 
 ## 公共输出与字段
 
 JSON 外层为 `{ok, command, status, exit_code, data, report}`。正常状态为 `success`，失败通常为 `failed`，未知为 `remote_unknown`，删除预览为 `confirm_required`。直接原样转述 report。
 
-下文「元数据」指 `{id, url, title, summary, tags, source_info, size_bytes, uploaded_at, content_updated_at, favorite, expires_at}`；收藏时 `expires_at=null`。`DOC_ID` 是服务端文档 ID，接收 1–128 位 ASCII 字母、数字、下划线或连字符（`[A-Za-z0-9_-]{1,128}`，例如 `Ab_9-x`）；不是链接。只有本地 `CLIENT_UPLOAD_ID` 才要求 32 位小写十六进制。时间 data 使用服务端 UTC，report 转本机时区。
+下文「元数据」指 `{id, url, title, summary, tags, source_info, size_bytes, uploaded_at, content_updated_at, favorite, expires_at}`；收藏时 `expires_at=null`。`DOC_ID` 是服务端文档 ID，接收 1–128 位 ASCII 字母、数字、下划线或连字符（`[A-Za-z0-9_-]{1,128}`，例如 `Ab_9-x`）；不是链接。只有本地 `CLIENT_UPLOAD_ID` 才要求 32 位小写十六进制。时间 data 使用服务端 UTC，report 转本机时区；有效时间转换溢出时直接显示原始时间，不把已确认成功改成失败或未知。
 
 所有命令可能退出 2：参数、文件、凭据、契约或只读失败、明确拒绝、补发替换的正文版本已变化或缺少准备时原始版本。通用错误 data 为 `{error, http_status, request_id}`，无法取得相应字段时可为 null。未过期上传/替换的未知结果 data 为 `{client_upload_id, resume_command}`；过期作废的 data 仅含 `{client_upload_id}`，不再提供恢复命令；已知成功而本地记录失败时，data 还保留服务端已知结果（含 id、url、title），report 明确成功及用 resume 补记；其他写操作未知时 data 可能为错误形状，使用 get 核对。
 
@@ -18,11 +18,11 @@ JSON 外层为 `{ok, command, status, exit_code, data, report}`。正常状态�
 
 `python3 bin/docsctl.py upload HTML (--summary TEXT | --summary-file FILE) [--title TEXT] [--tag TAG ...] [--share-friend NAME ...] [--share-group NAME ...] [--new]`。
 
-HTML 为本地非符号链接的普通 `.html` 文件，严格 UTF-8，1–2,097,152 字节；不接受 BOM、NUL、冲突 charset，需 HTML 起始和结束标记。工具只读源文件；标题优先使用显式 `--title`，其次为 `hx:title` meta，最后为唯一页面 `<title>`；忽略 SVG、MathML 内的 `<title>`。多个页面 `<title>`（即使文字相同或有 `hx:title`）必须显式提供 `--title`；无标题来源或选中的 meta 标题不合法时也需明确指定。标题 1–200 字。摘要纯文本 1–1000 字；摘要文件使用 UTF-8。标签、分享按技能入口规则。
+HTML 为本地非符号链接的普通 `.html` 文件，严格 UTF-8，1–2,097,152 字节；不接受 BOM、NUL、冲突 charset，需 HTML 起始和结束标记。工具只读源文件；标题优先使用显式 `--title`，其次为 `hx:title` meta，最后为唯一页面 `<title>`；忽略 SVG、MathML 内的 `<title>`。多个页面 `<title>`（即使文字相同或有 `hx:title`）必须显式提供 `--title`；无标题来源或选中的 meta 标题不合法时也需明确指定。标题先合并连续空白（含换行）为一个空格，再去首尾空白，结果须为 1–200 字；拒绝剩余 Cc、Cs，方向控制 U+202A–U+202E、U+2066–U+2069，以及 U+200B、U+2060、U+FEFF；允许其他 Cf（包括 ZWJ、ZWNJ、软连字符）。摘要纯文本 1–1000 字；摘要文件使用 UTF-8，先检查原始字节中的 Key，再将 CRLF 规整为 LF 后校验。标签、分享按技能入口规则。
 
 data：元数据加 `share_report: {shared: [{type, name}], failed: [{type, name, reason}]}`；失败原因 `not_friend` / `group_not_found`。工具从文件名和允许的页面元数据构造 source_info，不接收此参数。
 
-请求体中的标签、好友名和群名在既有去首尾空白、精确去重及校验后，按原样字符串排序；不做大小写折叠或 Unicode 归一化。仅交换这些参数的顺序会得到相同的请求字节和上传幂等键，`--new` 仍每次生成新的键。完全相同的请求在 24 小时内重放返回同一篇；不要把重放说成新建；重放的 share_report 是首次请求的历史结果，不能据此断言当前分享范围，需到网页核对。只有首次新建成功且分享报告为空时才说明只有本人能看。只有本次 upload 的第一次实际上传请求就返回 200 时，报告才提示重复内容与 `--new`；自动重试后或 resume 返回 200 时按上传成功报告，不建议另建，仍保留历史分享报告说明。用户确认另建才使用 `--new`；重放指向已删除文档会拒绝，仍需用户确认另建。退出 0、2、4、5；4 按 report 使用尚有效的 resume 命令或核对过期结果，5 表示未发上传请求。
+请求体中的标签、好友名和群名在既有去首尾空白、精确去重及校验后，按原样字符串排序；不做大小写折叠或 Unicode 归一化。仅交换这些参数的顺序会得到相同的请求字节和上传幂等键，`--new` 仍每次生成新的键。完全相同的请求在 24 小时内重放返回同一篇；不要把重放说成新建；重放的 share_report 是首次请求的历史结果，不能据此断言当前分享范围，需到网页核对。只有首次新建成功且分享报告为空时才说明只有本人能看。只有本次 upload 的第一次实际上传请求就返回 200 时，报告才提示重复内容与 `--new`；自动重试后或 resume 返回 200 时按上传成功报告，不建议另建，仍保留历史分享报告说明。用户确认另建才使用 `--new`；重放指向已删除文档会拒绝，仍需用户确认另建；若同时本地记录失败，report 保留删除/--new 说明及本地核对说明。退出 0、2、4、5；4 按 report 使用尚有效的 resume 命令或核对过期结果，5 表示未发上传请求。
 
 ## replace
 
@@ -33,6 +33,8 @@ data：元数据加 `share_report: {shared: [{type, name}], failed: [{type, name
 ## resume
 
 `python3 bin/docsctl.py resume CLIENT_UPLOAD_ID`。读取输出中的本地客户端上传 ID（32 位小写十六进制），不是 DOC_ID。data 成功时同原 upload/replace；上传补发前在清单命中时，data 为该篇清单元数据，不包含 share_report；已加载且未过期档案的未知结果为 `{client_upload_id, resume_command}`；过期作废时只有 `{client_upload_id}`。档案缺失、损坏或 ID 无效时无法加载恢复元数据，退出 4 的 data 为 `{error, http_status, request_id}`，不会提供 resume_command；按 report 停止并核对档案，不从源文件重建。退出 0、2、4。
+
+先通过安全 manifest 读取器查该客户端 ID 的最后一条已定结果，跳过损坏行；即使其后有 prepared/remote_unknown 也不改变已定结果。不联网、不重写历史：uploaded/replaced 核对当前 Key、合法文档 ID 与当前站点的精确链接后退出 0，data 为 `{id, url, title}`，report 给出链接；failed/abandoned 退出 2，data 为 `{client_upload_id}`，不提供 resume_command；abandoned 仍说明超过 24 小时且不会重发。成功记录站点不符时退出 2，提示回原环境；不安全历史或无效成功记录退出 4 并要求核对。没有已定结果才加载 pending，保留以下站点与恢复校验。
 
 meta 已有可信 `success: {id, url, title}` 时，核对私有元数据、Key 和站点后只离线补写 manifest 并删除档案；不查询账户、清单或正文版本，不重发，即使 request 文件已清理或准备时间已超过 24 小时也可补记。成功 data 为 `{id, url, title}`，report 给出链接及本地补记说明。成功元数据或 manifest 写入失败时仍退出 4，data 保留已知文档结果、client_upload_id、resume_command，report 含「文档已经上传成功：<url>；本地记录没写进去，用 resume 补记」与文档 ID。若成功元数据本身未能落盘，后续 resume 仍按正常恢复规则核对。
 

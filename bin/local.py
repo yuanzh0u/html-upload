@@ -32,7 +32,10 @@ def origin_from(env):
 def secure_directory(path, create=False):
     try:
         if create and not path.exists() and not path.is_symlink():
-            path.mkdir(mode=0o700)
+            try:
+                path.mkdir(mode=0o700)
+            except FileExistsError:
+                pass  # A concurrent creator must pass the same checks below.
         info = path.lstat()
         if (not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode)!=0o700 or info.st_uid!=os.geteuid()):
             raise Stop('本地私有目录类型、属主或权限不符')
