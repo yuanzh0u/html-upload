@@ -1,0 +1,69 @@
+# 命令参考
+
+所有命令使用 `python3 bin/docsctl.py`，需要 Python 3.12 以上；不提供 Key 或站点参数。每次业务调用先检查 docs-api 主版本。`--help` 显示文本帮助且退出 0，不发业务请求。
+
+## 公共输出与字段
+
+JSON 外层为 `{ok, command, status, exit_code, data, report}`。正常状态为 `success`，失败通常为 `failed`，未知为 `remote_unknown`，删除预览为 `confirm_required`。直接原样转述 report。
+
+下文「元数据」指 `{id, url, title, summary, tags, source_info, size_bytes, uploaded_at, content_updated_at, favorite, expires_at}`；收藏时 `expires_at=null`。`DOC_ID` 是服务端文档 ID，接收 1–128 位 ASCII 字母、数字、下划线或连字符（`[A-Za-z0-9_-]{1,128}`，例如 `Ab_9-x`）；不是链接。只有本地 `CLIENT_UPLOAD_ID` 才要求 32 位小写十六进制。时间 data 使用服务端 UTC，report 转本机时区。
+
+所有命令可能退出 2：参数、文件、凭据、契约或只读失败、明确拒绝。通用错误 data 为 `{error, http_status, request_id}`，无法取得相应字段时可为 null。上传/替换的未知结果 data 为 `{client_upload_id, resume_command}`；其他写操作未知时 data 可能为错误形状，使用 get 核对。
+
+## me
+
+`python3 bin/docsctl.py me`，无参数。data：`{user_name, api_version, daily_upload_limit, daily_upload_used, retention_days}`。退出 0、2。上传与替换成功各消耗一次日额度，重放及失败不计，额度按 UTC 自然日。
+
+## upload
+
+`python3 bin/docsctl.py upload HTML (--summary TEXT | --summary-file FILE) [--title TEXT] [--tag TAG ...] [--share-friend NAME ...] [--share-group NAME ...] [--new]`。
+
+HTML 为本地非符号链接的普通 `.html` 文件，严格 UTF-8，1–2,097,152 字节；不接受 BOM、NUL、冲突 charset，需 HTML 起始和结束标记。工具只读源文件；无 `--title` 时用唯一页面 title，否则需明确指定。标题 1–200 字。摘要纯文本 1–1000 字；摘要文件使用 UTF-8。标签、分享按技能入口规则。
+
+data：元数据加 `share_report: {shared: [{type, name}], failed: [{type, name, reason}]}`；失败原因 `not_friend` / `group_not_found`。工具从文件名和允许的页面元数据构造 source_info，不接收此参数。
+
+完全相同的请求在 24 小时内重放返回同一篇；不要把重放说成新建。用户确认另建才使用 `--new`；重放指向已删除文档会拒绝，仍需用户确认另建。退出 0、2、4、5；4 用返回的 resume 命令，5 表示未发上传请求。
+
+## replace
+
+`python3 bin/docsctl.py replace DOC_ID HTML (--summary TEXT | --summary-file FILE) [--share-friend NAME ...] [--share-group NAME ...]`。
+
+文件、摘要、分享规则同 upload，不支持 `--title`、`--tag` 或 `--new`。data：元数据加 share_report。链接、标题、标签不变；到期时间重新起算，分享只追加，收藏仍不过期。退出 0、2、4、5；未知结果用 resume，勿重复发起替换。
+
+## resume
+
+`python3 bin/docsctl.py resume CLIENT_UPLOAD_ID`。读取输出中的本地客户端上传 ID（32 位小写十六进制），不是 DOC_ID。data 成功时同原 upload/replace；已加载有效档案后的未知结果为 `{client_upload_id, resume_command}`。档案缺失、损坏或 ID 无效时无法加载恢复元数据，退出 4 的 data 为 `{error, http_status, request_id}`，不会提供 resume_command；按 report 停止并核对档案，不从源文件重建。退出 0、2、4。
+
+原样发送档案请求字节、原幂等键，不重新读 HTML 或摘要；档案缺失、被改动或超过准备时间 24 小时退出 4，不自动重发。先 list/get 核对；用户明确确认另起一篇后才重新 upload --new。详见 [本地记录](manifest.md)。
+
+## list
+
+`python3 bin/docsctl.py list [--query TEXT] [--tag TAG ...] [--from TIME] [--to TIME] [--sort uploaded_desc|uploaded_asc|title] [--limit N] [--cursor CURSOR | --all]`。
+
+时间是带时区的 RFC 3339，含起点、不含终点；默认 sort 为 uploaded_desc，limit 为 50（1–200）。data 默认 `{items: [元数据], next_cursor}`；`--all` 为 `{items, count}`。游标重复、重复文档或异常分页退出 2，data 保留已取得的 `{items, count}`，report 明示不完整，不声称全量成功。退出 0、2。
+
+## get
+
+`python3 bin/docsctl.py get DOC_ID`。data 为元数据，不能读取正文。退出 0、2。写操作未知后用它核对标题、摘要、标签、收藏等状态；删除后 not_found 表示不存在或无权限，照 report 告知，不自行断定原因。
+
+## edit
+
+`python3 bin/docsctl.py edit DOC_ID [--title TEXT] [--summary TEXT | --summary-file FILE] [--tag TAG ... | --clear-tags]`。至少改一项。标签整体替换；未给的字段不变。标题、摘要和标签约束同 upload；不改正文。data 为元数据，退出 0、2、4；4 用 get 核对，不盲目重发。
+
+## favorite
+
+`python3 bin/docsctl.py favorite DOC_ID`。data 为元数据（`favorite=true, expires_at=null`），收藏中不会过期。退出 0、2、4；4 用 get 核对。
+
+## unfavorite
+
+`python3 bin/docsctl.py unfavorite DOC_ID`。data 为元数据（`favorite=false`），取消收藏后有 24 小时宽限，新的到期时间见 report。退出 0、2、4；4 用 get 核对。
+
+## delete
+
+`python3 bin/docsctl.py delete DOC_ID [--yes]`。不带 --yes 只取元数据预览：data 为元数据，退出 3，没有删除。转述 report，取得用户对这篇文档永久删除的明确同意后才加 --yes。
+
+删除成功为 HTTP 204，无响应体，data 为 null，退出 0。也可能退出 2、4；4 先用 get 核对。删除后所有人立即无法打开，不能恢复。
+
+## tags
+
+`python3 bin/docsctl.py tags`，无参数。data：`{items: [{tag, count}]}`。用于查看已用标签，不表示可自动替用户选标签。退出 0、2。
