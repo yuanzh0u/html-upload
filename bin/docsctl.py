@@ -439,7 +439,16 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             return result
 
         api = client.Client(origin, token, transport=capture, sleep=sleep, rng=rng)
-        me = api.me()
+
+        def preflight(read):
+            try:
+                return read()
+            except local.Stop as error:
+                if command == 'resume' and meta is not None:
+                    raise local.Stop(error.message + '；先前写操作结果仍未知', code=4) from None
+                raise
+
+        me = preflight(api.me)
         if command == 'me':
             data = me
             report = f'今日已用 {me["daily_upload_used"]}/{me["daily_upload_limit"]} 次'
@@ -455,13 +464,16 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                                      title=title, origin=origin, content_updated_at=version, check=check_secret)
             op, doc_id = meta['op'], meta['doc_id']
             if command == 'resume' and op == 'replace':
-                if replacement_version(api, origin, doc_id) != meta['content_updated_at']:
+                current_version = preflight(lambda: replacement_version(api, origin, doc_id))
+                if current_version != meta['content_updated_at']:
                     store.finalize(home, meta, clock(), error='superseded', check=check_secret)
                     raise local.Stop('这篇文档在准备这次替换之后被改动过（可能正是这次替换已经生效，也可能是之后的另一次替换）。'
                                      '为避免覆盖较新的内容，不再补发；请用 get 查看当前状态，需要时重新执行 replace')
             path = '/api/v2/documents' if op == 'upload' else '/api/v2/documents/' + doc_id + '/content'
             try:
-                remote_status, value, headers = api.send_idempotent('POST' if op == 'upload' else 'PUT', path, raw, meta['idempotency_key'])
+                remote_status, value, headers = api.send_idempotent(
+                    'POST' if op == 'upload' else 'PUT', path, raw, meta['idempotency_key'],
+                    unknown=command == 'resume')
                 if 200 <= remote_status < 300:
                     if not trusted(value, origin, doc_id):
                         raise client.RemoteUnknown()
@@ -480,10 +492,6 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                 else:
                     raise client.RemoteUnknown()
             except client.RemoteUnknown:
-                try:
-                    store.record(home, meta, 'remote_unknown', clock(), check=check_secret)
-                except (OSError, local.Stop):
-                    pass
                 raise local.Stop('写操作结果未知', code=4) from None
     except (local.Stop, fields.FieldError, OSError, UnicodeError) as error:
         code = error.code if isinstance(error, local.Stop) else 2
@@ -491,6 +499,11 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
         report = error.message if isinstance(error, local.Stop) else ('本地文件读取失败' if isinstance(error, (OSError, UnicodeError)) else str(error))
         data = error_data(*(last[:2] if last is not None and not 200 <= last[0] < 300 else (None, None)))
         if code == 4 and meta is not None:
+            try:
+                store.record(home, meta, 'remote_unknown', clock(), check=check_secret)
+            except Exception:
+                # A failed event append must not hide the recovery information.
+                pass
             resume = 'python3 bin/docsctl.py resume ' + meta['client_upload_id']
             data = dict(client_upload_id=meta['client_upload_id'], resume_command=resume)
             report += '\n' + resume

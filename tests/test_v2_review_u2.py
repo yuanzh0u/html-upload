@@ -143,7 +143,9 @@ class ReplacementVersionTests(unittest.TestCase):
         self.fake.docs[self.ident]['content_updated_at'] = None
         puts = len([c for c in self.fake.calls if c['method'] == 'PUT'])
         code, result = self.cli('resume', ident)
-        self.assertNotEqual(code, 0)
+        self.assertEqual((code, result['status']), (4, 'remote_unknown'))
+        self.assertEqual(result['data']['client_upload_id'], ident)
+        self.assertIn('resume ' + ident, result['data']['resume_command'])
         self.assertEqual(len([c for c in self.fake.calls if c['method'] == 'PUT']), puts)
         self.assertEqual([path.read_bytes() for path in self.files(ident)], before)
 

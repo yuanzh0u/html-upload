@@ -8,7 +8,7 @@ JSON 外层为 `{ok, command, status, exit_code, data, report}`。正常状态�
 
 下文「元数据」指 `{id, url, title, summary, tags, source_info, size_bytes, uploaded_at, content_updated_at, favorite, expires_at}`；收藏时 `expires_at=null`。`DOC_ID` 是服务端文档 ID，接收 1–128 位 ASCII 字母、数字、下划线或连字符（`[A-Za-z0-9_-]{1,128}`，例如 `Ab_9-x`）；不是链接。只有本地 `CLIENT_UPLOAD_ID` 才要求 32 位小写十六进制。时间 data 使用服务端 UTC，report 转本机时区。
 
-所有命令可能退出 2：参数、文件、凭据、契约或只读失败、明确拒绝、补发替换的正文版本已变化或缺失。通用错误 data 为 `{error, http_status, request_id}`，无法取得相应字段时可为 null。上传/替换的未知结果 data 为 `{client_upload_id, resume_command}`；其他写操作未知时 data 可能为错误形状，使用 get 核对。
+所有命令可能退出 2：参数、文件、凭据、契约或只读失败、明确拒绝、补发替换的正文版本已变化或缺少准备时原始版本。通用错误 data 为 `{error, http_status, request_id}`，无法取得相应字段时可为 null。上传/替换的未知结果 data 为 `{client_upload_id, resume_command}`；其他写操作未知时 data 可能为错误形状，使用 get 核对。
 
 ## me
 
@@ -34,7 +34,7 @@ data：元数据加 `share_report: {shared: [{type, name}], failed: [{type, name
 
 `python3 bin/docsctl.py resume CLIENT_UPLOAD_ID`。读取输出中的本地客户端上传 ID（32 位小写十六进制），不是 DOC_ID。data 成功时同原 upload/replace；已加载有效档案后的未知结果为 `{client_upload_id, resume_command}`。档案缺失、损坏或 ID 无效时无法加载恢复元数据，退出 4 的 data 为 `{error, http_status, request_id}`，不会提供 resume_command；按 report 停止并核对档案，不从源文件重建。退出 0、2、4。
 
-先核对档案 origin 与当前站点；不一致或档案未记录站点时退出 2，提示「请在原来的环境里补发」，不联网并保留档案。核对通过后，替换还会查询当前 content_updated_at，与准备时保存的版本一致才补发。版本已变化时退出 2，记 failed（error=superseded）并删除档案，报告说明可能是本次已生效或后来又被替换，要求用 get 核对、需要时重新 replace；档案缺少有效的原始正文版本时退出 2 并保留档案，不补填版本。通过检查后原样发送档案请求字节、原幂等键，不重新读 HTML 或摘要；档案缺失、被改动或从准备时间起已满 24 小时退出 4，不自动重发。每次实际内容请求及重试前都会检查原始期限；版本检查或等待期间到期也会停止，保留恢复档案。先 list/get 核对；用户明确确认另起一篇后才重新 upload --new。详见 [本地记录](manifest.md)。
+先核对档案 origin 与当前站点；不一致或档案未记录站点时退出 2，提示「请在原来的环境里补发」，不联网并保留档案。有效档案的账户查询或当前元数据查询失败时退出 4，记 remote_unknown，保留档案并返回 client_upload_id、resume_command。先前未知的写入不会因后续明确错误而变成失败，只有可信成功响应才能确定成功；需要时用 list/get 核对。核对通过后，替换还会查询当前 content_updated_at，与准备时保存的版本一致才补发。版本已变化时退出 2，记 failed（error=superseded）并删除档案，报告说明可能是本次已生效或后来又被替换，要求用 get 核对、需要时重新 replace；档案缺少有效的原始正文版本时退出 2 并保留档案，不补填版本。通过检查后原样发送档案请求字节、原幂等键，不重新读 HTML 或摘要；档案缺失、被改动或从准备时间起已满 24 小时退出 4，不自动重发。每次实际内容请求及重试前都会检查原始期限；版本检查或等待期间到期也会停止，记 remote_unknown 并保留恢复档案。先 list/get 核对；用户明确确认另起一篇后才重新 upload --new。详见 [本地记录](manifest.md)。
 
 ## list
 

@@ -143,15 +143,20 @@ class Client:
         except OSError:
             raise RemoteUnknown('写操作可能已经生效，请用 get 核对') from None
 
-    def send_idempotent(self, method, path, raw, idem):
+    def send_idempotent(self, method, path, raw, idem, *, unknown=False):
+        # A later refusal cannot disprove that an earlier attempt took effect.
+        # Pending resumes also carry uncertainty from the earlier invocation.
         for attempt in range(6):
             try:
                 result = self.transport(method, self.origin + path, self.token, raw, idem)
             except OSError:
-                pass
+                unknown = True
             else:
                 if result[0] not in TRANSIENT:
+                    if unknown and not 200 <= result[0] < 300:
+                        raise RemoteUnknown('写操作结果未知，请用 resume 恢复')
                     return result
+                unknown = True
             if attempt < 5:
                 self._pause(attempt + 1)
         raise RemoteUnknown('写操作结果未知，请用 resume 恢复')
