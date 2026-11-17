@@ -35,12 +35,18 @@ def contains_key(value, token):
 
 
 def redact(value, token):
+    if not token:
+        return value
     if isinstance(value, str):
-        return value.replace(token, '[已隐藏]') if token else value
-    if isinstance(value, dict):
-        return {redact(k, token): redact(v, token) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [redact(v, token) for v in value]
+        value = value.replace(token, '[已隐藏]')
+    elif isinstance(value, dict):
+        value = {redact(k, token): redact(v, token) for k, v in value.items()}
+    elif isinstance(value, (list, tuple)):
+        value = [redact(v, token) for v in value]
+    # Escaping, numeric scalars, or container syntax can introduce a Key that
+    # was absent from the logical strings. Redact a whole value, never JSON text.
+    if token in json.dumps(value, ensure_ascii=False):
+        return '[已隐藏]'
     return value
 
 
@@ -129,8 +135,10 @@ def trusted(doc, origin, doc_id):
 
 def success_report(doc, op, status):
     lines = ['链接：' + doc['url'], '对方需登录且在分享范围内才能打开。']
-    if op == 'upload' and status == 200:
+    replay = op == 'upload' and status == 200
+    if replay:
         lines.append('24 小时内提交过完全相同的内容和参数，返回的是同一篇；要另起一篇就加 --new。')
+        lines.append('以下分享报告来自首次请求；当前分享范围可能已变化，请到网页核对。')
     if op == 'replace':
         lines.append('链接不变；到期时间已从现在重新起算；替换只会新增分享，不会移除已有分享。')
     if doc.get('favorite') is True:
@@ -147,9 +155,16 @@ def success_report(doc, op, status):
         lines.append('可以到网页的分享管理里补分享。')
     elif shared:
         lines.append('已全部分享成功：' + '、'.join(x['name'] for x in shared))
+    elif replay:
+        lines.append('首次请求未指定分享对象。')
+    elif op == 'replace':
+        lines.append('本次未追加分享对象；已有分享保持不变。')
     else:
         lines.append('未指定分享对象，目前只有你自己能看。')
     return '\n'.join(lines)
+
+
+MAX_LIST_PAGES = 1000
 
 
 MANAGE = ('list', 'get', 'edit', 'favorite', 'unfavorite', 'delete', 'tags')
@@ -213,6 +228,7 @@ def manage(api, args, body, origin):
                 query.append((name, value))
         query.extend(('tag', tag) for tag in args.tag)
         items, ids, cursors = [], set(), set()
+        pages = 0
         while True:
             page = api.get('/api/v2/documents', query)
             entries, cursor = page.get('items'), page.get('next_cursor')
@@ -236,8 +252,12 @@ def manage(api, args, body, origin):
                 return 2, 'failed', dict(items=items, count=len(items)), '服务端分页异常（' + reason + '），已停止，结果不完整'
             items.extend(entries)
             ids.update(page_ids)
+            pages += 1
             if not args.all or not cursor:
                 break
+            if pages >= MAX_LIST_PAGES:
+                return (2, 'failed', dict(items=items, count=len(items)),
+                        '已达到 1000 页安全上限，已停止，结果不完整；请缩小筛选范围后重试。')
             cursors.add(cursor)
             query = [(k, v) for k, v in query if k != 'cursor'] + [('cursor', cursor)]
         report = '共 ' + str(len(items)) + ' 篇'
@@ -295,8 +315,10 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
     env = os.environ if env is None else env
     out = sys.stdout if out is None else out
     argv = sys.argv[1:] if argv is None else argv
-    command = argv[0] if argv else None
-    token = env.get('DOCS_API_KEY', '')
+    command = argv[0] if argv and argv[0] in ('me', 'upload', 'replace', 'resume', *MANAGE) else None
+    # Only credential() may establish a verified secret. Rejected input must
+    # never become a pattern that rewrites the output protocol itself.
+    token = ''
     meta = None
     last = None
     write_sent = False
@@ -365,22 +387,29 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
         elif command == 'resume':
             pending_meta, raw = store.load_pending(home, args.client_upload_id)
             archived = json.loads(raw)
-            if (contains_key(pending_meta, token) or contains_key(archived, token) or
+            if (contains_key(pending_meta, token) or contains_key(raw, token) or contains_key(archived, token) or
                     contains_key(base64.b64decode(archived['html_base64']), token)):
                 raise local.Stop(KEY_CONTENT)
             meta = pending_meta
-            if clock() - meta['prepared_at'] > 86400:
+            if clock() >= meta['prepared_at'] + 86400:
                 raise local.Stop('超过 24 小时，服务端已不记得这次请求，不会自动重发；请先用 list 核对是否已经上传成功', code=4)
 
         def capture(*a, **kw):
             nonlocal last, write_sent
             last = None
-            # A response cursor must never become a credential-bearing URL.
+            # Inspect the exact wire representation as well as decoded URL
+            # values. Never redact or reserialize an idempotent request.
             from urllib.parse import unquote_plus
-            if contains_key(unquote_plus(a[1]), token):
-                raise local.Stop(KEY_CONTENT)
+            check_secret(a[1])
+            check_secret(unquote_plus(a[1]))
+            if len(a) > 3:
+                check_secret(a[3])
             if len(a) > 4:
                 check_secret(a[4])
+                # /me, retries and backoff may have consumed the remaining
+                # lifetime. Guard every content attempt at the dispatch boundary.
+                if meta is not None and clock() >= meta['prepared_at'] + 86400:
+                    raise local.Stop('超过 24 小时，服务端已不记得这次请求，不会自动重发；请先用 list 核对是否已经上传成功', code=4)
             if a[0] != 'GET':
                 write_sent = True
             result = (transport or client.http_request)(*a, **kw)
@@ -453,9 +482,10 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
         elif write_sent:
             report += '\n结果未知，请用 python3 bin/docsctl.py get ' + args.doc_id + ' 核对'
     result = dict(ok=code == 0, command=command, status=status, exit_code=code, data=data, report=report)
-    text = json.dumps(redact(result, token), ensure_ascii=False)
-    if isinstance(token, str) and token:
-        text = text.replace(token, '[已隐藏]')
+    # A rejected credential may itself spell the spaced protocol prefix. It
+    # is never a redaction pattern; compact formatting avoids that coincidence.
+    text = json.dumps(redact(result, token), ensure_ascii=False,
+                      separators=None if token else (',', ':'))
     out.write(text + '\n')
     return code
 

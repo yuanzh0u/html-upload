@@ -22,25 +22,25 @@ HTML 为本地非符号链接的普通 `.html` 文件，严格 UTF-8，1–2,097
 
 data：元数据加 `share_report: {shared: [{type, name}], failed: [{type, name, reason}]}`；失败原因 `not_friend` / `group_not_found`。工具从文件名和允许的页面元数据构造 source_info，不接收此参数。
 
-完全相同的请求在 24 小时内重放返回同一篇；不要把重放说成新建。用户确认另建才使用 `--new`；重放指向已删除文档会拒绝，仍需用户确认另建。退出 0、2、4、5；4 用返回的 resume 命令，5 表示未发上传请求。
+完全相同的请求在 24 小时内重放返回同一篇；不要把重放说成新建；重放的 share_report 是首次请求的历史结果，不能据此断言当前分享范围，需到网页核对。只有首次新建成功且分享报告为空时才说明只有本人能看。用户确认另建才使用 `--new`；重放指向已删除文档会拒绝，仍需用户确认另建。退出 0、2、4、5；4 用返回的 resume 命令，5 表示未发上传请求。
 
 ## replace
 
 `python3 bin/docsctl.py replace DOC_ID HTML (--summary TEXT | --summary-file FILE) [--share-friend NAME ...] [--share-group NAME ...]`。
 
-文件、摘要、分享规则同 upload，不支持 `--title`、`--tag` 或 `--new`。data：元数据加 share_report。链接、标题、标签不变；到期时间重新起算，分享只追加，收藏仍不过期。退出 0、2、4、5；未知结果用 resume，勿重复发起替换。
+文件、摘要、分享规则同 upload，不支持 `--title`、`--tag` 或 `--new`。data：元数据加 share_report。链接、标题、标签不变；到期时间重新起算，分享只追加，收藏仍不过期。分享报告为空表示本次未追加分享对象，已有分享保持不变，不能解释为只有本人能看。退出 0、2、4、5；未知结果用 resume，勿重复发起替换。
 
 ## resume
 
 `python3 bin/docsctl.py resume CLIENT_UPLOAD_ID`。读取输出中的本地客户端上传 ID（32 位小写十六进制），不是 DOC_ID。data 成功时同原 upload/replace；已加载有效档案后的未知结果为 `{client_upload_id, resume_command}`。档案缺失、损坏或 ID 无效时无法加载恢复元数据，退出 4 的 data 为 `{error, http_status, request_id}`，不会提供 resume_command；按 report 停止并核对档案，不从源文件重建。退出 0、2、4。
 
-原样发送档案请求字节、原幂等键，不重新读 HTML 或摘要；档案缺失、被改动或超过准备时间 24 小时退出 4，不自动重发。先 list/get 核对；用户明确确认另起一篇后才重新 upload --new。详见 [本地记录](manifest.md)。
+原样发送档案请求字节、原幂等键，不重新读 HTML 或摘要；档案缺失、被改动或从准备时间起已满 24 小时退出 4，不自动重发。每次实际内容请求及重试前都会检查原始期限；版本检查或等待期间到期也会停止，保留恢复档案。先 list/get 核对；用户明确确认另起一篇后才重新 upload --new。详见 [本地记录](manifest.md)。
 
 ## list
 
 `python3 bin/docsctl.py list [--query TEXT] [--tag TAG ...] [--from TIME] [--to TIME] [--sort uploaded_desc|uploaded_asc|title] [--limit N] [--cursor CURSOR | --all]`。
 
-时间是带时区的 RFC 3339，含起点、不含终点；默认 sort 为 uploaded_desc，limit 为 50（1–200）。data 默认 `{items: [元数据], next_cursor}`；`--all` 为 `{items, count}`。游标重复、重复文档或异常分页退出 2，data 保留已取得的 `{items, count}`，report 明示不完整，不声称全量成功。退出 0、2。
+时间是带时区的 RFC 3339，含起点、不含终点；默认 sort 为 uploaded_desc，limit 为 50（1–200）。data 默认 `{items: [元数据], next_cursor}`；`--all` 为 `{items, count}`。`--all` 最多读取 1000 页（默认每页 50 条，最多取得 50000 条；limit=200 时最多 200000 条）；第 1000 页 next_cursor 为空时仍完整成功，否则停止并建议缩小筛选范围。游标重复、重复文档、达到页数上限或异常分页退出 2，data 保留已取得的 `{items, count}`，report 明示不完整，不声称全量成功。退出 0、2。
 
 ## get
 
