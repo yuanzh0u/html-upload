@@ -133,11 +133,12 @@ def trusted(doc, origin, doc_id):
         return False
 
 
-def success_report(doc, op, status):
+def success_report(doc, op, status, *, duplicate_hint=True):
     lines = ['链接：' + doc['url'], '对方需登录且在分享范围内才能打开。']
     replay = op == 'upload' and status == 200
-    if replay:
+    if replay and duplicate_hint:
         lines.append('24 小时内提交过完全相同的内容和参数，返回的是同一篇；要另起一篇就加 --new。')
+    if replay:
         lines.append('以下分享报告来自首次请求；当前分享范围可能已变化，请到网页核对。')
     if op == 'replace':
         lines.append('链接不变；到期时间已从现在重新起算；替换只会新增分享，不会移除已有分享。')
@@ -479,7 +480,8 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                         raise client.RemoteUnknown()
                     store.finalize(home, meta, clock(), doc=value, check=check_secret)
                     code, status, data = 0, 'success', value
-                    report = success_report(value, op, remote_status)
+                    report = success_report(value, op, remote_status,
+                                            duplicate_hint=command != 'resume' and api.idempotent_attempts == 1)
                 elif 400 <= remote_status < 500 or remote_status == 507:
                     data = error_data(remote_status, value)
                     report = client.describe(remote_status, value, headers)

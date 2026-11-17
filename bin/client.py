@@ -146,7 +146,9 @@ class Client:
     def send_idempotent(self, method, path, raw, idem, *, unknown=False):
         # A later refusal cannot disprove that an earlier attempt took effect.
         # Pending resumes also carry uncertainty from the earlier invocation.
+        self.idempotent_attempts = 0
         for attempt in range(6):
+            self.idempotent_attempts += 1
             try:
                 result = self.transport(method, self.origin + path, self.token, raw, idem)
             except OSError:
