@@ -208,6 +208,8 @@ git rm -r .verify-p6
 
 `SKILL.md` 先改成一句占位说明：「V2 改造中，见 docs/V2-impl-plan.md」。U08 再重写。
 
+`.github/workflows/tests.yml` 里为 V1 加的 `env: PYTHONPATH`，连同上面两行注释一起删掉；V2 的测试会自己设置导入路径。
+
 - [ ] **步骤 3：回归并提交**
 
 ```bash
