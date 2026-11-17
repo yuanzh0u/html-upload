@@ -21,3 +21,13 @@ class FieldRegressionTests(unittest.TestCase):
                     fields.clean_summary(nonblank)
                 self.assertEqual(caught.exception.field, 'summary')
                 self.assertEqual(str(caught.exception), '摘要含不允许的控制字符')
+
+
+class ClientRegressionTests(unittest.TestCase):
+    def test_non_string_error_codes_use_http_fallback(self):
+        import client
+        for value in ([], {}, ['internal_error'], {'code': 'internal_error'}, None, 123, True):
+            with self.subTest(value=value):
+                self.assertEqual(client.describe(400, {'error': value}, {}), '服务端返回 HTTP 400')
+                self.assertEqual(client.describe(503, {'error': value}, {}),
+                                 '服务端返回 HTTP 503；写操作可能已经生效，请用 get 核对')
