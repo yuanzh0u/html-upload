@@ -110,6 +110,7 @@ class Inspector(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.templates = 0
+        self.foreign = []
         self.script = False
         self.title = None
         self.titles = []
@@ -119,12 +120,18 @@ class Inspector(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if self.script:
             return
+        if self.foreign:
+            if tag in ('svg', 'math'):
+                self.foreign.append(tag)
+            return
         if tag == 'template':
             self.templates += 1
             return
         if self.templates:
             return
-        if tag == 'script':
+        if tag in ('svg', 'math'):
+            self.foreign.append(tag)
+        elif tag == 'script':
             self.script = True
         elif tag == 'title':
             self.title = []
@@ -147,6 +154,10 @@ class Inspector(HTMLParser):
             if tag == 'script':
                 self.script = False
             return
+        if self.foreign:
+            if tag == self.foreign[-1]:
+                self.foreign.pop()
+            return
         if tag == 'template' and self.templates:
             self.templates -= 1
             return
@@ -157,7 +168,7 @@ class Inspector(HTMLParser):
             self.title = None
 
     def handle_data(self, data):
-        if not self.templates and not self.script and self.title is not None:
+        if not self.templates and not self.foreign and not self.script and self.title is not None:
             self.title.append(data)
 
 
@@ -177,12 +188,16 @@ def inspect_html(data):
     parser.close()
     if any(value.strip().lower() not in ('utf-8', 'utf8') for value in parser.charsets):
         raise Stop('HTML charset 声明与严格 UTF-8 字节要求冲突')
-    return {'titles': list(dict.fromkeys(parser.titles)), 'meta': parser.meta}
+    return {'titles': parser.titles, 'meta': parser.meta}
 
 
 def pick_title(explicit, inspected):
     if explicit is not None:
         value = explicit
+    elif len(inspected['titles']) > 1:
+        raise Stop('页面标题有多个，请提供 --title')
+    elif 'hx:title' in inspected['meta']:
+        value = inspected['meta']['hx:title']
     elif len(inspected['titles']) == 1:
         value = inspected['titles'][0]
     else:

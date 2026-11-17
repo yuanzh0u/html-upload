@@ -29,6 +29,8 @@ python3 bin/docsctl.py delete DOC_ID
 python3 bin/docsctl.py tags
 ```
 
+上传标题优先使用显式 `--title`，其次为 `hx:title` meta，最后为唯一页面 `<title>`；SVG、MathML 的图题不算页面标题。多个页面 `<title>` 即使同名或存在 meta 也必须提供 `--title`；选中的标题仍需通过标题校验。
+
 ## 摘要规则
 
 上传、替换必须提供纯文本摘要，目标 100–300 字，硬上限 1000 字（Unicode 字符）；用户给了摘要就用用户的。没有摘要时，依据已有的内容上下文概括用途、主要内容和结论；上下文不足就请用户提供摘要，不通过读取远端正文补齐。

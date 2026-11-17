@@ -18,7 +18,7 @@ JSON 外层为 `{ok, command, status, exit_code, data, report}`。正常状态�
 
 `python3 bin/docsctl.py upload HTML (--summary TEXT | --summary-file FILE) [--title TEXT] [--tag TAG ...] [--share-friend NAME ...] [--share-group NAME ...] [--new]`。
 
-HTML 为本地非符号链接的普通 `.html` 文件，严格 UTF-8，1–2,097,152 字节；不接受 BOM、NUL、冲突 charset，需 HTML 起始和结束标记。工具只读源文件；无 `--title` 时用唯一页面 title，否则需明确指定。标题 1–200 字。摘要纯文本 1–1000 字；摘要文件使用 UTF-8。标签、分享按技能入口规则。
+HTML 为本地非符号链接的普通 `.html` 文件，严格 UTF-8，1–2,097,152 字节；不接受 BOM、NUL、冲突 charset，需 HTML 起始和结束标记。工具只读源文件；标题优先使用显式 `--title`，其次为 `hx:title` meta，最后为唯一页面 `<title>`；忽略 SVG、MathML 内的 `<title>`。多个页面 `<title>`（即使文字相同或有 `hx:title`）必须显式提供 `--title`；无标题来源或选中的 meta 标题不合法时也需明确指定。标题 1–200 字。摘要纯文本 1–1000 字；摘要文件使用 UTF-8。标签、分享按技能入口规则。
 
 data：元数据加 `share_report: {shared: [{type, name}], failed: [{type, name, reason}]}`；失败原因 `not_friend` / `group_not_found`。工具从文件名和允许的页面元数据构造 source_info，不接收此参数。
 
