@@ -432,12 +432,12 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             body = dict(summary=summary, html_base64=base64.b64encode(html).decode('ascii'),
                         sha256=hashlib.sha256(html).hexdigest())
             if share:
-                body['share_with'] = share
+                body['share_with'] = {name: sorted(values) for name, values in share.items()}
             if command == 'upload':
                 title = local.pick_title(title, inspected)
                 body.update(title=title, source_info=local.build_source_info(inspected, Path(args.html)))
                 if tags:
-                    body['tags'] = tags
+                    body['tags'] = sorted(tags)
             if contains_key(body, token):
                 raise local.Stop(KEY_CONTENT)
             raw = canonical(body)
