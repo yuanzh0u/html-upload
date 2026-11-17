@@ -139,8 +139,20 @@ class UnknownOutcomeTests(unittest.TestCase):
 
     def test_retry_deadline_records_unknown_and_preserves_request(self):
         self.fake.fail_next = ['network']
-        code, result = self.upload(sleep=lambda _: setattr(self, 'now', self.now + 86400))
-        meta, raw = self.assert_unknown(code, result)
+        snapshot = []
+        def transport(*args):
+            if args[0] == 'POST':
+                ident = store.read_manifest(self.home)[-1]['client_upload_id']
+                snapshot.append(store.load_pending(self.home, ident))
+            return self.fake.transport(*args)
+        code, result = self.upload(transport=transport,
+                                   sleep=lambda _: setattr(self, 'now', self.now + 86400))
+        self.assertEqual((code, result['status']), (4, 'remote_unknown'))
+        meta, raw = snapshot[0]
+        self.assertNotIn('resume_command', result['data'])
+        self.assertNotIn('resume ', result['report'])
+        self.assertEqual(list((self.home / 'docs/v2/.pending').iterdir()), [])
+        self.assertEqual(store.read_manifest(self.home)[-1]['status'], 'abandoned')
         calls = [c for c in self.fake.calls if c['method'] == 'POST']
         self.assertEqual(len(calls), 1)
         self.assertEqual((calls[0]['body'], calls[0]['idem']), (raw, meta['idempotency_key']))
@@ -157,10 +169,15 @@ class UnknownOutcomeTests(unittest.TestCase):
         calls = len(self.fake.calls)
         events = self.event_count()
         code, result = self.cli('resume', ident, transport=transport)
-        self.assert_unknown(code, result, ident)
+        self.assertEqual((code, result['status']), (4, 'remote_unknown'))
+        self.assertEqual(result['data']['client_upload_id'], ident)
+        self.assertNotIn('resume_command', result['data'])
+        self.assertNotIn('resume ', result['report'])
+        self.assertEqual(list((self.home / 'docs/v2/.pending').iterdir()), [])
+        self.assertEqual(store.read_manifest(self.home)[-1]['status'], 'abandoned')
         self.assertEqual(self.event_count(), events + 1)
         # U5 completes its required read-only lookup even after /me crosses
-        # the deadline; the archive and no-write guarantees still apply.
+        # the deadline; U12 now abandons/deletes it while preserving no-write.
         self.assertEqual([(c['method'], c['path']) for c in self.fake.calls[calls:]],
                          [('GET', '/api/v2/me'), ('GET', '/api/v2/documents')])
 

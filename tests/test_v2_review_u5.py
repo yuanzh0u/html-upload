@@ -155,7 +155,13 @@ class ResumeLookupTests(unittest.TestCase):
     def test_expired_pending_without_match_is_read_before_refusing_resend(self):
         self.now += 86401
         code, result = self.cli()
-        self.assert_unknown(code, result)
+        self.assertEqual((code, result['status']), (4, 'remote_unknown'))
+        self.assertEqual(result['data']['client_upload_id'], self.meta['client_upload_id'])
+        self.assertNotIn('resume_command', result['data'])
+        self.assertNotIn('resume ', result['report'])
+        self.assertEqual(self.posts(), [])
+        self.assertEqual(list((self.home / 'docs/v2/.pending').iterdir()), [])
+        self.assertEqual(store.read_manifest(self.home)[-1]['status'], 'abandoned')
         self.assertEqual(len(self.lists()), 1)
         self.assertIn('超过 24 小时', result['report'])
 

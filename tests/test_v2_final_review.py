@@ -57,7 +57,11 @@ class FinalReviewTests(unittest.TestCase):
         self.assertEqual(code, 4)
         self.assertIn('24 小时', result['report'])
         self.assertEqual([c for c in self.fake.calls if c['method'] == 'POST'], [])
-        self.assert_pending(meta)
+        self.assertTrue(all(not (self.home / 'docs/v2/.pending' /
+                                 (meta['client_upload_id'] + suffix)).exists()
+                            for suffix in ('.meta.json', '.request.json')))
+        self.assertEqual(store.read_manifest(self.home)[-1]['status'], 'abandoned')
+        self.assertNotIn('resume_command', result['data'])
 
     def test_resume_retry_at_deadline_preserves_request_without_resending(self):
         meta = self.pending()
@@ -68,15 +72,23 @@ class FinalReviewTests(unittest.TestCase):
         code, result = self.cli('resume', meta['client_upload_id'], sleep=sleep)
         self.assertEqual(code, 4)
         self.assertEqual(len([c for c in self.fake.calls if c['method'] == 'POST']), 1)
-        self.assertIn('resume ' + meta['client_upload_id'], result['report'])
-        self.assert_pending(meta)
+        self.assertNotIn('resume ', result['report'])
+        self.assertTrue(all(not (self.home / 'docs/v2/.pending' /
+                                 (meta['client_upload_id'] + suffix)).exists()
+                            for suffix in ('.meta.json', '.request.json')))
+        self.assertEqual(store.read_manifest(self.home)[-1]['status'], 'abandoned')
+        self.assertNotIn('resume_command', result['data'])
 
     def test_new_upload_retries_cannot_outlive_preparation_deadline(self):
         self.fake.fail_next = ['network']
         code, result = self.upload(sleep=lambda _: setattr(self, 'now', self.now + 86400))
         self.assertEqual(code, 4)
         self.assertEqual(len([c for c in self.fake.calls if c['method'] == 'POST']), 1)
-        store.load_pending(self.home, result['data']['client_upload_id'])
+        ident = result['data']['client_upload_id']
+        self.assertTrue(all(not (self.home / 'docs/v2/.pending' / (ident + suffix)).exists()
+                            for suffix in ('.meta.json', '.request.json')))
+        self.assertEqual(store.read_manifest(self.home)[-1]['status'], 'abandoned')
+        self.assertNotIn('resume_command', result['data'])
 
     def test_serialized_edit_secret_is_rejected_before_write(self):
         self.fake.seed(1)

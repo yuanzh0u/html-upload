@@ -16,7 +16,7 @@ from local import Stop, private_read, secure_directory
 from fields import clean_doc_id
 
 ROOT = Path('docs/v2')
-STATUSES = ('prepared', 'uploaded', 'replaced', 'remote_unknown', 'failed')
+STATUSES = ('prepared', 'uploaded', 'replaced', 'remote_unknown', 'failed', 'abandoned')
 MAX_BODY = 2_861_740
 HEX_ID = re.compile(r'[0-9a-f]{32}')
 
@@ -95,6 +95,35 @@ def file_lock(path):
         yield
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+@contextmanager
+def archive_lock(home, ident, *, blocking=True):
+    """Stable lock inode shared by resume and startup expiry, never by payload."""
+    if not isinstance(ident, str) or HEX_ID.fullmatch(ident) is None:
+        raise Stop('恢复档案标识无效；停止，请核对本地档案', code=4)
+    try:
+        root = directories(home)
+        locks = root / '.archive-locks'
+        secure_directory(locks, True)
+        fd = checked_fd(locks / (ident + '.lock'), os.O_RDWR)
+    except (OSError, Stop):
+        raise Stop('恢复档案锁无法安全取得；停止，请核对本地档案', code=4) from None
+    acquired = False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+        except OSError:
+            raise Stop('恢复档案锁无法安全取得；停止，请核对本地档案', code=4) from None
+        else:
+            acquired = True
+            yield True
+    finally:
+        if acquired:
+            fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 
@@ -235,6 +264,86 @@ def remember_success(home, meta, doc, *, check=None):
     meta.update(success=saved['success'])
 
 
+def expired(meta, now):
+    return now >= meta['prepared_at'] + 86400
+
+
+def pending_paths(home, meta):
+    ident = meta['client_upload_id']
+    if not isinstance(ident, str) or HEX_ID.fullmatch(ident) is None:
+        raise OSError('档案标识无效')
+    root = directories(home)
+    return [root / '.pending' / (ident + suffix)
+            for suffix in ('.request.json', '.meta.json')]
+
+
+def check_pending_files(paths):
+    # Validate every existing file before deleting any; never unlink a symlink
+    # or a path selected by metadata rather than the fixed archive ID/suffixes.
+    for path in paths:
+        try:
+            fd = checked_fd(path, os.O_RDONLY, create=False)
+        except FileNotFoundError:
+            continue
+        os.close(fd)
+
+
+def remove_pending(paths):
+    check_pending_files(paths)
+    for path in paths:
+        path.unlink(missing_ok=True)
+    sync_dir(paths[0].parent)
+
+
+def abandon(home, meta, now, *, check=None):
+    paths = pending_paths(home, meta)
+    check_pending_files(paths)
+    record(home, meta, 'abandoned', now, check=check)
+    remove_pending(paths)
+
+
+def sweep_expired(home, now, *, exclude=None, origin=None, check=None):
+    """Best-effort private archive expiry; no network or arbitrary file cleanup."""
+    try:
+        root = directories(home)
+        names = [path.name for path in (root / '.pending').iterdir()]
+    except (OSError, Stop):
+        return
+    for name in names:
+        if not re.fullmatch(r'[0-9a-f]{32}\.meta\.json', name):
+            continue
+        ident = name[:-len('.meta.json')]
+        if ident == exclude:
+            continue
+        try:
+            with archive_lock(home, ident, blocking=False) as acquired:
+                if not acquired:
+                    continue
+                meta, raw = load_pending(home, ident, allow_success=True)
+                if not expired(meta, now):
+                    continue
+                if check is not None:
+                    check(meta)
+                    check(canonical(meta))
+                    if raw is not None:
+                        body = json.loads(raw)
+                        check(raw)
+                        check(body)
+                        check(base64.b64decode(body['html_base64'], validate=True))
+                if 'success' in meta:
+                    # Known success has no resend deadline; repair only in its
+                    # original environment, leaving unsafe/mismatched records alone.
+                    if meta.get('origin') == origin and success_valid(meta):
+                        check_pending_files(pending_paths(home, meta))
+                        finalize(home, meta, now, doc=meta['success'], check=check)
+                else:
+                    abandon(home, meta, now, check=check)
+        except (OSError, Stop, ValueError, TypeError, KeyError, RecursionError, OverflowError):
+            # A damaged or unsafe archive is never made into a new event and
+            # never grants ownership of files for cleanup. Do not echo its data.
+            continue
+
+
 def finalize(home, meta, now, *, doc=None, error=None, check=None):
     try:
         record(home, meta, ('uploaded' if meta['op'] == 'upload' else 'replaced') if doc is not None else 'failed',
@@ -242,10 +351,7 @@ def finalize(home, meta, now, *, doc=None, error=None, check=None):
     except (OSError, Stop):
         raise Stop('本地记录失败；请用 resume 恢复', code=4) from None
     try:
-        root = directories(home)
-        for suffix in ('.request.json', '.meta.json'):
-            (root / '.pending' / (meta['client_upload_id'] + suffix)).unlink(missing_ok=True)
-        sync_dir(root / '.pending')
+        remove_pending(pending_paths(home, meta))
     except (OSError, Stop):
         pass
 

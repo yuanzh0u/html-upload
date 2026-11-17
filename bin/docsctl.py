@@ -1,6 +1,7 @@
 """JSON command entry point for the V2 docs client (Python 3.12+)."""
 import argparse
 import base64
+from contextlib import ExitStack
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -18,6 +19,8 @@ import store
 
 
 KEY_CONTENT = local.KEY_CONTENT
+EXPIRED_REPORT = ('超过 24 小时，服务端已不记得这次请求，不会重发；请用 list 核对，'
+                  '确认没有成功的话，重新执行 upload/replace')
 
 
 def contains_key(value, token):
@@ -368,6 +371,24 @@ def local_record_failure(meta, doc):
     return 4, 'remote_unknown', data, report
 
 
+def pending_failure(home, meta, now, check, report):
+    if store.expired(meta, now):
+        report = EXPIRED_REPORT
+        try:
+            store.abandon(home, meta, now, check=check)
+        except Exception:
+            # Expiry still forbids resending when local persistence fails.
+            report += '\n本地作废记录或清理失败；请核对本地档案'
+        return 4, 'remote_unknown', dict(client_upload_id=meta['client_upload_id']), report
+    try:
+        store.record(home, meta, 'remote_unknown', now, check=check)
+    except Exception:
+        pass
+    resume = 'python3 bin/docsctl.py resume ' + meta['client_upload_id']
+    return (4, 'remote_unknown', dict(client_upload_id=meta['client_upload_id'], resume_command=resume),
+            report + '\n' + resume)
+
+
 def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng=random.uniform, transport=None):
     env = os.environ if env is None else env
     out = sys.stdout if out is None else out
@@ -380,6 +401,7 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
     last = None
     write_sent = False
     known_success = None
+    recovery = ExitStack()
     code, status, data, report = 2, 'failed', error_data(), ''
     try:
         parser = build_parser()
@@ -413,6 +435,9 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                 raise local.Stop(KEY_CONTENT)
         command = args.command
         origin = local.origin_from(env)
+        store.sweep_expired(home, clock(),
+                            exclude=args.client_upload_id if command == 'resume' else None,
+                            origin=origin, check=check_secret)
         if command in MANAGE:
             body = manage_options(args)
         if command in ('upload', 'replace'):
@@ -444,6 +469,7 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             if len(raw) > fields.MAX_BODY:
                 raise local.Stop('JSON 请求体超过大小上限')
         elif command == 'resume':
+            recovery.enter_context(store.archive_lock(home, args.client_upload_id))
             pending_meta, raw = store.load_pending(home, args.client_upload_id, allow_success=True)
             check_secret(pending_meta)
             check_secret(store.canonical(pending_meta))
@@ -465,8 +491,8 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                 store.finalize(home, meta, clock(), doc=known_success, check=check_secret)
                 code, status, data = 0, 'success', known_success
                 report = '链接：' + known_success['url'] + '\n对方需登录且在分享范围内才能打开。\n已补记本地成功记录'
-            elif meta['op'] != 'upload' and clock() >= meta['prepared_at'] + 86400:
-                raise local.Stop('超过 24 小时，服务端已不记得这次请求，不会自动重发；请先用 list 核对是否已经上传成功', code=4)
+            elif meta['op'] != 'upload' and store.expired(meta, clock()):
+                raise local.Stop(EXPIRED_REPORT, code=4)
 
         if known_success is None:
             def capture(*a, **kw):
@@ -483,8 +509,8 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                     check_secret(a[4])
                     # /me, retries and backoff may have consumed the remaining
                     # lifetime. Guard every content attempt at the dispatch boundary.
-                    if meta is not None and clock() >= meta['prepared_at'] + 86400:
-                        raise local.Stop('超过 24 小时，服务端已不记得这次请求，不会自动重发；请先用 list 核对是否已经上传成功', code=4)
+                    if meta is not None and store.expired(meta, clock()):
+                        raise local.Stop(EXPIRED_REPORT, code=4)
                 if a[0] != 'GET':
                     write_sent = True
                 result = (transport or client.http_request)(*a, **kw)
@@ -518,7 +544,11 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                                          title=title, origin=origin, content_updated_at=version, check=check_secret)
                 op, doc_id = meta['op'], meta['doc_id']
                 if command == 'resume' and op == 'replace':
+                    if store.expired(meta, clock()):
+                        raise local.Stop(EXPIRED_REPORT, code=4)
                     current_version = preflight(lambda: replacement_version(api, origin, doc_id))
+                    if store.expired(meta, clock()):
+                        raise local.Stop(EXPIRED_REPORT, code=4)
                     if current_version != meta['content_updated_at']:
                         store.finalize(home, meta, clock(), error='superseded', check=check_secret)
                         raise local.Stop('这篇文档在准备这次替换之后被改动过（可能正是这次替换已经生效，也可能是之后的另一次替换）。'
@@ -571,14 +601,7 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             report = error.message if isinstance(error, local.Stop) else ('本地文件读取失败' if isinstance(error, (OSError, UnicodeError)) else str(error))
             data = error_data(*(last[:2] if last is not None and not 200 <= last[0] < 300 else (None, None)))
             if code == 4 and meta is not None:
-                try:
-                    store.record(home, meta, 'remote_unknown', clock(), check=check_secret)
-                except Exception:
-                    # A failed event append must not hide the recovery information.
-                    pass
-                resume = 'python3 bin/docsctl.py resume ' + meta['client_upload_id']
-                data = dict(client_upload_id=meta['client_upload_id'], resume_command=resume)
-                report += '\n' + resume
+                code, status, data, report = pending_failure(home, meta, clock(), check_secret, report)
     except Exception as error:
         if known_success is not None:
             code, status, data, report = local_record_failure(meta, known_success)
@@ -588,15 +611,11 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             data = error_data()
             report = type(error).__name__
             if meta is not None:
-                try:
-                    store.record(home, meta, 'remote_unknown', clock(), check=check_secret)
-                except Exception:
-                    pass
-                resume = 'python3 bin/docsctl.py resume ' + meta['client_upload_id']
-                data = dict(client_upload_id=meta['client_upload_id'], resume_command=resume)
-                report += '\n' + resume
+                code, status, data, report = pending_failure(home, meta, clock(), check_secret, report)
             elif write_sent:
                 report += '\n结果未知，请用 python3 bin/docsctl.py get ' + args.doc_id + ' 核对'
+    finally:
+        recovery.close()
     result = dict(ok=code == 0, command=command, status=status, exit_code=code, data=data, report=report)
     # A rejected credential may itself spell the spaced protocol prefix. It
     # is never a redaction pattern; compact formatting avoids that coincidence.
