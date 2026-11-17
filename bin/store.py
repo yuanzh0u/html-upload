@@ -12,6 +12,7 @@ import re
 import secrets
 import stat
 from local import Stop, private_read, secure_directory
+from fields import clean_doc_id
 
 ROOT = Path('docs/v2')
 STATUSES = ('prepared', 'uploaded', 'replaced', 'remote_unknown', 'failed')
@@ -158,7 +159,7 @@ def load_pending(home, client_id):
             raise ValueError()
         if (meta['client_upload_id'] != client_id or meta['op'] not in ('upload', 'replace')
                 or (meta['op'] == 'upload' and meta['doc_id'] is not None)
-                or (meta['op'] == 'replace' and (not isinstance(meta['doc_id'], str) or HEX_ID.fullmatch(meta['doc_id']) is None))
+                or (meta['op'] == 'replace' and clean_doc_id(meta['doc_id']) != meta['doc_id'])
                 or not isinstance(meta['idempotency_key'], str)
                 or re.fullmatch(r'[A-Za-z0-9_-]{1,100}', meta['idempotency_key']) is None
                 or not isinstance(meta['title'], str) or not 1 <= len(meta['title']) <= 200

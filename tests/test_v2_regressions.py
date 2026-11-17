@@ -31,3 +31,126 @@ class ClientRegressionTests(unittest.TestCase):
                 self.assertEqual(client.describe(400, {'error': value}, {}), '服务端返回 HTTP 400')
                 self.assertEqual(client.describe(503, {'error': value}, {}),
                                  '服务端返回 HTTP 503；写操作可能已经生效，请用 get 核对')
+
+
+class UploadOutcomeRegressionTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from v2_fake import FakeDocs
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.home = Path(temp.name)
+        self.page = self.home / 'page.html'
+        self.page.write_text('<html><title>测试</title></html>')
+        self.fake = FakeDocs()
+
+    def cli(self, *argv, transport=None):
+        import io
+        import json
+        import docsctl
+        output = io.StringIO()
+        code = docsctl.run(list(argv), env={'HOME': str(self.home), 'DOCS_API_KEY': self.fake.key,
+                           'DOCS_ORIGIN': self.fake.origin}, out=output, clock=lambda: 1800000000,
+                           transport=transport or self.fake.transport, sleep=lambda _: None)
+        return code, json.loads(output.getvalue())
+
+    def upload(self, **kw):
+        return self.cli('upload', str(self.page), '--summary', '测试', **kw)
+
+    def test_me_failure_has_structured_remote_error_without_message(self):
+        self.fake.echo_token = True
+        self.fake.fail_reads = [(401, 'unauthorized')]
+        code, result = self.cli('me')
+        self.assertEqual(code, 2)
+        self.assertEqual(result['data'], {'error': 'unauthorized', 'http_status': 401,
+                                         'request_id': 'fake-request'})
+        self.assertNotIn('测试错误', result['report'])
+
+    def test_success_with_untrusted_url_preserves_pending(self):
+        def transport(*a, **kw):
+            status, value, headers = self.fake.transport(*a, **kw)
+            if a[0] == 'POST':
+                value['url'] = 'https://untrusted.invalid/d/' + value['id']
+            return status, value, headers
+        code, result = self.upload(transport=transport)
+        self.assertEqual(code, 4)
+        self.assertEqual(len(list((self.home / 'docs/v2/.pending').iterdir())), 2)
+        self.assertIn('resume ', result['report'])
+
+    def test_record_failure_after_success_retains_recovery(self):
+        from unittest.mock import patch
+        import local
+        with patch('store.finalize', side_effect=local.Stop('本地记录失败', code=4)):
+            code, result = self.upload()
+        self.assertEqual(code, 4)
+        self.assertEqual(len(self.fake.docs), 1)
+        ident = result['data']['client_upload_id']
+        first = [c for c in self.fake.calls if c['method'] == 'POST'][0]
+        self.assertEqual(self.cli('resume', ident)[0], 0)
+        last = [c for c in self.fake.calls if c['method'] == 'POST'][-1]
+        self.assertEqual((first['body'], first['idem']), (last['body'], last['idem']))
+        self.assertEqual(len(self.fake.docs), 1)
+
+    def test_record_failure_after_rejection_remains_definite(self):
+        from unittest.mock import patch
+        import local
+        self.fake.fail_next = [(429, 'daily_limit_reached')]
+        with patch('store.finalize', side_effect=local.Stop('本地记录失败', code=4)):
+            code, result = self.upload()
+        self.assertEqual(code, 2)
+        self.assertEqual(result['data']['http_status'], 429)
+        self.assertEqual(result['data']['error'], 'daily_limit_reached')
+        self.assertEqual(len(self.fake.docs), 0)
+
+
+class ResumeIdRegressionTests(unittest.TestCase):
+    def test_nonhex_safe_replacement_id_roundtrips_but_unsafe_id_rejected(self):
+        import json
+        import tempfile
+        import local
+        import store
+        from v2_fake import FakeDocs
+        with tempfile.TemporaryDirectory() as home:
+            raw = FakeDocs.upload_raw()
+            digest = json.loads(raw)['sha256']
+            for ident in ('Ab_9-x', '../unsafe'):
+                meta = store.prepare(home, 'replace', ident, raw, digest, 'resume-key', 1800000000,
+                                     title='测试文档')
+                if ident == 'Ab_9-x':
+                    loaded, archived = store.load_pending(home, meta['client_upload_id'])
+                    self.assertEqual(loaded['doc_id'], ident)
+                    self.assertEqual(archived, raw)
+                else:
+                    with self.assertRaises(local.Stop):
+                        store.load_pending(home, meta['client_upload_id'])
+
+    def test_nonhex_safe_replacement_resumes_original_request(self):
+        import io
+        import json
+        import tempfile
+        import docsctl
+        from v2_fake import FakeDocs
+        with tempfile.TemporaryDirectory() as home:
+            fake = FakeDocs()
+            fake.seed(1)
+            doc = next(iter(fake.docs.values()))
+            fake.docs.clear()
+            doc.update(id='Ab_9-x', url=fake.origin + '/d/Ab_9-x')
+            fake.docs[doc['id']] = doc
+            page = Path(home) / 'page.html'
+            page.write_text('<html><title>测试</title></html>')
+            def cli(argv):
+                out = io.StringIO()
+                code = docsctl.run(argv, env={'HOME': home, 'DOCS_API_KEY': fake.key,
+                                   'DOCS_ORIGIN': fake.origin}, out=out, clock=lambda: 1800000000,
+                                   transport=fake.transport, sleep=lambda _: None)
+                return code, json.loads(out.getvalue())
+            fake.fail_next = ['lost'] + ['network'] * 5
+            code, result = cli(['replace', 'Ab_9-x', str(page), '--summary', '测试'])
+            self.assertEqual(code, 4)
+            ident = result['data']['client_upload_id']
+            code, result = cli(['resume', ident])
+            self.assertEqual(code, 0)
+            self.assertEqual(result['data']['id'], 'Ab_9-x')
+            writes = [c for c in fake.calls if c['method'] == 'PUT']
+            self.assertEqual(len({(c['body'], c['idem']) for c in writes}), 1)
