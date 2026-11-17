@@ -11,6 +11,7 @@ import urllib.request
 
 from local import KEY_GUIDANCE, Stop
 
+BODY_CHUNK_SIZE = 64 * 1024
 TRANSIENT = frozenset({500, 502, 503, 504})
 ADVICE = {
     'invalid_request': '请求格式不合法，请检查参数',
@@ -76,11 +77,17 @@ class HTTPSHandler(urllib.request.HTTPSHandler):
 
 def http_request(method, url, token, body=None, idem=None):
     headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/json'}
+    data = None
     if body is not None:
         headers['Content-Type'] = 'application/json'
+        headers['Content-Length'] = str(len(body))
+        # Each sendall gets its own socket timeout, even on a slow uplink.
+        # Recreate the iterator here so every retry starts at byte zero.
+        data = (body[start:start + BODY_CHUNK_SIZE]
+                for start in range(0, len(body), BODY_CHUNK_SIZE))
     if idem is not None:
         headers['Idempotency-Key'] = idem
-    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(), HTTPHandler(), HTTPSHandler())
     try:
         try:
