@@ -154,3 +154,79 @@ class ResumeIdRegressionTests(unittest.TestCase):
             self.assertEqual(result['data']['id'], 'Ab_9-x')
             writes = [c for c in fake.calls if c['method'] == 'PUT']
             self.assertEqual(len({(c['body'], c['idem']) for c in writes}), 1)
+
+
+class MaintenanceRegressionTests(unittest.TestCase):
+    setUp = UploadOutcomeRegressionTests.setUp
+    cli = UploadOutcomeRegressionTests.cli
+
+    def test_pagination_duplicate_id_and_empty_page_stop(self):
+        for fault in ('duplicate', 'empty'):
+            with self.subTest(fault=fault):
+                self.fake.docs.clear()
+                self.fake.seed(3)
+                seen = []
+                def transport(*args):
+                    status, value, headers = self.fake.transport(*args)
+                    if args[0] == 'GET' and '/documents?' in args[1]:
+                        if seen:
+                            value['items'] = seen[:1] if fault == 'duplicate' else []
+                            value['next_cursor'] = 'another'
+                        else:
+                            seen.extend(value['items'])
+                    return status, value, headers
+                code, result = self.cli('list', '--all', '--limit', '1', transport=transport)
+                self.assertEqual(code, 2)
+                self.assertIn('结果不完整', result['report'])
+                self.assertEqual(result['data']['count'], 1)
+
+    def test_single_writes_unknown_statuses_are_not_retried(self):
+        self.fake.seed(1)
+        ident = next(iter(self.fake.docs))
+        for command in ('edit', 'favorite', 'unfavorite', 'delete'):
+            for status in (302, 500, 502, 503, 504):
+                with self.subTest(command=command, status=status):
+                    self.fake.calls.clear()
+                    self.fake.fail_next = [(status, 'internal_error')]
+                    extra = ['--title', '改名'] if command == 'edit' else ['--yes'] if command == 'delete' else []
+                    code, result = self.cli(command, ident, *extra)
+                    self.assertEqual((code, result['status']), (4, 'remote_unknown'))
+                    self.assertIn('get ' + ident, result['report'])
+                    self.assertEqual(len([c for c in self.fake.calls if c['method'] != 'GET']), 1)
+
+    def test_malformed_success_keeps_unknown_classification(self):
+        self.fake.seed(1)
+        ident = next(iter(self.fake.docs))
+        for field, value in (('expires_at', []), ('uploaded_at', {}), ('tags', None), ('url', 'https://invalid.example')):
+            with self.subTest(field=field):
+                def transport(*args):
+                    status, result, headers = self.fake.transport(*args)
+                    if args[0] == 'PATCH':
+                        result[field] = value
+                    return status, result, headers
+                code, result = self.cli('edit', ident, '--title', '改名', transport=transport)
+                self.assertEqual((code, result['status']), (4, 'remote_unknown'))
+                self.assertIn('get ' + ident, result['report'])
+
+    def test_edit_validation_and_missing_summary_file_precede_me(self):
+        self.fake.seed(1)
+        ident = next(iter(self.fake.docs))
+        for args in (('--title', ''), ('--summary', ''), ('--tag', 'x' * 41),
+                     ('--summary-file', str(self.home / 'missing'))):
+            self.assertEqual(self.cli('edit', ident, *args)[0], 2)
+        self.assertEqual(self.fake.calls, [])
+
+    def test_definite_rejections_and_empty_tags_and_partial_page_reports(self):
+        self.assertIn('还没有用过标签', self.cli('tags')[1]['report'])
+        self.fake.seed(2)
+        self.assertIn('--cursor ', self.cli('list', '--limit', '1')[1]['report'])
+        ident = next(iter(self.fake.docs))
+        self.fake.fail_next = [(507, 'storage_low')]
+        self.assertEqual(self.cli('favorite', ident)[0], 2)
+        code, result = self.cli('edit', ident, '--clear-tags', '--summary', ' 新摘要 ')
+        self.assertEqual(code, 0)
+        self.assertIn('标签已清空', result['report'])
+        code, result = self.cli('get', ident)
+        self.assertEqual(code, 0)
+        for text in ('标题：', '链接：', '摘要：新摘要', '标签：', '上传时间：', '到期时间：'):
+            self.assertIn(text, result['report'])

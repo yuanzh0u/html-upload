@@ -44,6 +44,30 @@ def build_parser():
             p.add_argument('--title')
             p.add_argument('--tag', action='append', default=[])
             p.add_argument('--new', action='store_true')
+    p = sub.add_parser('list')
+    p.add_argument('--query')
+    p.add_argument('--tag', action='append', default=[])
+    p.add_argument('--from', dest='uploaded_from')
+    p.add_argument('--to', dest='uploaded_to')
+    p.add_argument('--sort', choices=('uploaded_desc', 'uploaded_asc', 'title'), default='uploaded_desc')
+    p.add_argument('--limit', type=int, default=50)
+    group = p.add_mutually_exclusive_group()
+    group.add_argument('--cursor')
+    group.add_argument('--all', action='store_true')
+    for name in ('get', 'edit', 'favorite', 'unfavorite', 'delete'):
+        p = sub.add_parser(name)
+        p.add_argument('doc_id')
+        if name == 'delete':
+            p.add_argument('--yes', action='store_true')
+        if name == 'edit':
+            p.add_argument('--title')
+            group = p.add_mutually_exclusive_group()
+            group.add_argument('--summary')
+            group.add_argument('--summary-file')
+            group = p.add_mutually_exclusive_group()
+            group.add_argument('--tag', action='append')
+            group.add_argument('--clear-tags', action='store_true')
+    sub.add_parser('tags')
     sub.add_parser('resume').add_argument('client_upload_id')
     return parser
 
@@ -101,6 +125,145 @@ def success_report(doc, op, status):
     return '\n'.join(lines)
 
 
+MANAGE = ('list', 'get', 'edit', 'favorite', 'unfavorite', 'delete', 'tags')
+
+
+def manage_options(args):
+    body = {}
+    if args.command == 'list':
+        if not 1 <= args.limit <= 200:
+            raise local.Stop('limit 必须在 1–200 之间')
+        for value in (args.uploaded_from, args.uploaded_to):
+            if value is not None:
+                try:
+                    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                    if parsed.tzinfo is None or parsed.utcoffset() is None:
+                        raise ValueError()
+                except ValueError:
+                    raise local.Stop('时间必须是带时区的 RFC 3339') from None
+        args.tag = fields.clean_tags(args.tag)
+    elif args.command != 'tags':
+        args.doc_id = fields.clean_doc_id(args.doc_id)
+        if args.command == 'edit':
+            if args.title is not None:
+                body['title'] = fields.clean_title(args.title)
+            if args.summary is not None or args.summary_file is not None:
+                summary = args.summary if args.summary_file is None else Path(args.summary_file).read_text(encoding='utf-8')
+                body['summary'] = fields.clean_summary(summary)
+            if args.tag is not None or args.clear_tags:
+                body['tags'] = fields.clean_tags(args.tag or [])
+            if not body:
+                raise local.Stop('edit 至少要修改一项')
+    return body
+
+
+def display_time(value):
+    stamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if stamp.tzinfo is None:
+        raise ValueError('missing timezone')
+    return stamp.astimezone().strftime('%Y-%m-%d %H:%M')
+
+
+def metadata_valid(doc, origin, ident):
+    try:
+        return (isinstance(doc, dict) and doc['id'] == ident and
+                doc['url'] == origin + '/d/' + ident and isinstance(doc['title'], str) and
+                isinstance(doc['summary'], str) and isinstance(doc['tags'], list) and
+                all(isinstance(t, str) for t in doc['tags']) and
+                isinstance(doc['favorite'], bool) and bool(display_time(doc['uploaded_at'])) and
+                ((doc['favorite'] and doc['expires_at'] is None) or
+                 (not doc['favorite'] and bool(display_time(doc['expires_at'])))))
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError, OSError):
+        return False
+
+
+def manage(api, args, body, origin):
+    command = args.command
+    if command == 'list':
+        query = [('sort', args.sort), ('limit', str(args.limit))]
+        for name, value in (('q', args.query), ('uploaded_from', args.uploaded_from), ('uploaded_to', args.uploaded_to), ('cursor', args.cursor)):
+            if value is not None:
+                query.append((name, value))
+        query.extend(('tag', tag) for tag in args.tag)
+        items, ids, cursors = [], set(), set()
+        while True:
+            page = api.get('/api/v2/documents', query)
+            entries, cursor = page.get('items'), page.get('next_cursor')
+            reason = None
+            if not isinstance(entries, list) or not (cursor is None or isinstance(cursor, str)):
+                reason = '响应格式无效'
+            elif not entries and cursor:
+                reason = '空页仍有游标'
+            elif cursor and cursor in cursors:
+                reason = '游标重复'
+            else:
+                page_ids = []
+                for entry in entries:
+                    if not isinstance(entry, dict) or not isinstance(entry.get('id'), str):
+                        reason = '文档格式无效'
+                        break
+                    page_ids.append(entry['id'])
+                if ids.intersection(page_ids) or len(page_ids) != len(set(page_ids)):
+                    reason = '文档 ID 重复'
+            if reason:
+                return 2, 'failed', dict(items=items, count=len(items)), '服务端分页异常（' + reason + '），已停止，结果不完整'
+            items.extend(entries)
+            ids.update(page_ids)
+            if not args.all or not cursor:
+                break
+            cursors.add(cursor)
+            query = [(k, v) for k, v in query if k != 'cursor'] + [('cursor', cursor)]
+        report = '共 ' + str(len(items)) + ' 篇'
+        report += ''.join('\n' + str(d.get('title', '')) + '：' + str(d.get('url', '')) for d in items[:50])
+        if not args.all and cursor:
+            report += '\n还有下一页：加 --cursor ' + cursor + ' 继续，或用 --all 取全部'
+        return 0, 'success', dict(items=items, count=len(items)) if args.all else page, report
+    if command == 'tags':
+        data = api.get('/api/v2/tags')
+        items = data.get('items', [])
+        report = ('共 ' + str(len(items)) + ' 个标签：' + '、'.join(str(t['tag']) + '（' + str(t['count']) + '）' for t in items)) if items else '还没有用过标签'
+        return 0, 'success', data, report
+    ident = args.doc_id
+    path = '/api/v2/documents/' + ident
+    if command == 'get' or (command == 'delete' and not args.yes):
+        data = api.get(path)
+        if not metadata_valid(data, origin, ident):
+            raise local.Stop('服务端元数据格式无效')
+        if command == 'delete':
+            return 3, 'confirm_required', data, f'将永久删除《{data["title"]}》（{data["url"]}）。删除后所有人立即无法打开，不能恢复。请先向用户确认；用户同意后执行：python3 bin/docsctl.py delete {ident} --yes'
+        report = f'标题：{data["title"]}\n链接：{data["url"]}\n摘要：{data["summary"]}\n标签：' + '、'.join(data['tags']) + '\n上传时间：' + display_time(data['uploaded_at'])
+        report += '\n收藏中，不会过期' if data['favorite'] else '\n到期时间：' + display_time(data['expires_at'])
+        return 0, 'success', data, report
+    try:
+        method = {'edit': 'PATCH', 'favorite': 'PUT', 'unfavorite': 'DELETE', 'delete': 'DELETE'}[command]
+        remote_status, data, headers = api.send(method, path + ('/favorite' if command in ('favorite', 'unfavorite') else ''), body if command == 'edit' else None)
+        if remote_status in client.TRANSIENT or not (200 <= remote_status < 300 or 400 <= remote_status < 500 or remote_status == 507):
+            raise client.RemoteUnknown()
+        if not 200 <= remote_status < 300:
+            return 2, 'failed', error_data(remote_status, data), client.describe(remote_status, data, headers)
+        if command == 'delete':
+            if remote_status != 204:
+                raise client.RemoteUnknown()
+            return 0, 'success', data, '文档已永久删除'
+        if remote_status != 200 or not metadata_valid(data, origin, ident):
+            raise client.RemoteUnknown()
+        if command == 'favorite':
+            if not data['favorite']:
+                raise client.RemoteUnknown()
+            report = '收藏中，不会过期'
+        elif command == 'unfavorite':
+            if data['favorite']:
+                raise client.RemoteUnknown()
+            report = '取消收藏后有 24 小时宽限；新的到期时间：' + display_time(data['expires_at'])
+        else:
+            report = '已修改：' + '、'.join({'title': '标题', 'summary': '摘要', 'tags': '标签'}[key] for key in body)
+            if 'tags' in body:
+                report += '\n标签已整体替换为：' + '、'.join(body['tags']) if body['tags'] else '\n标签已清空'
+        return 0, 'success', data, report
+    except client.RemoteUnknown:
+        raise local.Stop(f'结果未知，请用 python3 bin/docsctl.py get {ident} 核对', code=4) from None
+
+
 def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng=random.uniform, transport=None):
     env = os.environ if env is None else env
     out = sys.stdout if out is None else out
@@ -115,6 +278,8 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
         command = args.command
         home = Path(env.get('HOME', ''))
         origin = local.origin_from(env)
+        if command in MANAGE:
+            body = manage_options(args)
         if command in ('upload', 'replace'):
             summary = args.summary
             if args.summary_file is not None:
@@ -164,6 +329,8 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             data = me
             report = f'今日已用 {me["daily_upload_used"]}/{me["daily_upload_limit"]} 次'
             code, status = 0, 'success'
+        elif command in MANAGE:
+            code, status, data, report = manage(api, args, body, origin)
         else:
             if command != 'resume':
                 idem = (client.idempotency_key(raw, secrets.token_hex(16) if args.new else '')
