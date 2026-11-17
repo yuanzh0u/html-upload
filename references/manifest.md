@@ -41,12 +41,12 @@
 | remote_unknown | 写入结果未知，需恢复或核对 |
 | failed | 远端明确拒绝，结果已确定 |
 
-准备档案元数据包括 client_upload_id、op、doc_id、idempotency_key、sha256、title、prepared_at（Unix 时间秒）。request.json 保存完整原请求字节，不得手工编辑或重新序列化。
+准备档案元数据包括 client_upload_id、op、doc_id、idempotency_key、sha256、title、prepared_at（Unix 时间秒）、origin（准备请求时的目标站点）。request.json 保存完整原请求字节，不得手工编辑或重新序列化。
 
 ## 档案删除与 resume
 
 成功或远端明确拒绝后，先追加确定事件，再删除两份 pending 档案；无长期正文副本。结果未知或远端成功但本地记录失败时保留档案用于恢复。若清理文件失败可能残留档案；残留不表示远端失败，也不要据此重复上传。manifest 只追加，不随成功删除。
 
-使用输出中的 `python3 bin/docsctl.py resume CLIENT_UPLOAD_ID`；恢复会检查档案完整性，重发完全相同的字节和原幂等键。档案缺失或被改动退出 4，停止并核对，不从源文件重建档案。
+使用输出中的 `python3 bin/docsctl.py resume CLIENT_UPLOAD_ID`；恢复会先核对档案记录的 origin 与当前站点。站点不一致、缺失或为空时，退出 2，提示「请在原来的环境里补发」，不联网并保留档案；不要手工补填或修改 origin。恢复会检查档案完整性，重发完全相同的字节和原幂等键。档案缺失或被改动退出 4，停止并核对，不从源文件重建档案。
 
 从 prepared_at 起满 24 小时不再自动重发：每次实际内容请求（包括重试）前都检查同一个原始期限；版本检查、请求或重试等待期间到期也会停止并保留档案。服务端幂等记录只有 24 小时，再发可能另建一篇或再次替换。先 list/get 核对实际结果；只有用户确认另起一篇才 upload --new。恢复成功、明确拒绝、仍未知时分别按原操作的结果处理。其他维护命令不使用这些上传档案；结果未知时 get 核对。

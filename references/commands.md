@@ -34,7 +34,7 @@ data：元数据加 `share_report: {shared: [{type, name}], failed: [{type, name
 
 `python3 bin/docsctl.py resume CLIENT_UPLOAD_ID`。读取输出中的本地客户端上传 ID（32 位小写十六进制），不是 DOC_ID。data 成功时同原 upload/replace；已加载有效档案后的未知结果为 `{client_upload_id, resume_command}`。档案缺失、损坏或 ID 无效时无法加载恢复元数据，退出 4 的 data 为 `{error, http_status, request_id}`，不会提供 resume_command；按 report 停止并核对档案，不从源文件重建。退出 0、2、4。
 
-原样发送档案请求字节、原幂等键，不重新读 HTML 或摘要；档案缺失、被改动或从准备时间起已满 24 小时退出 4，不自动重发。每次实际内容请求及重试前都会检查原始期限；版本检查或等待期间到期也会停止，保留恢复档案。先 list/get 核对；用户明确确认另起一篇后才重新 upload --new。详见 [本地记录](manifest.md)。
+先核对档案 origin 与当前站点；不一致或档案未记录站点时退出 2，提示「请在原来的环境里补发」，不联网并保留档案。核对通过后原样发送档案请求字节、原幂等键，不重新读 HTML 或摘要；档案缺失、被改动或从准备时间起已满 24 小时退出 4，不自动重发。每次实际内容请求及重试前都会检查原始期限；版本检查或等待期间到期也会停止，保留恢复档案。先 list/get 核对；用户明确确认另起一篇后才重新 upload --new。详见 [本地记录](manifest.md)。
 
 ## list
 

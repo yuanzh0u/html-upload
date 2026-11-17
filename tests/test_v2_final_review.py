@@ -39,7 +39,7 @@ class FinalReviewTests(unittest.TestCase):
     def pending(self):
         raw = FakeDocs.upload_raw()
         return store.prepare(self.home, 'upload', None, raw, json.loads(raw)['sha256'],
-                             'original-idempotency-key', self.now, title=json.loads(raw)['title'])
+                             'original-idempotency-key', self.now, title=json.loads(raw)['title'], origin=self.fake.origin)
 
     def assert_pending(self, meta):
         loaded, _ = store.load_pending(self.home, meta['client_upload_id'])

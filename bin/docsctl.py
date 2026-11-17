@@ -390,6 +390,8 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             if (contains_key(pending_meta, token) or contains_key(raw, token) or contains_key(archived, token) or
                     contains_key(base64.b64decode(archived['html_base64']), token)):
                 raise local.Stop(KEY_CONTENT)
+            if pending_meta.get('origin') != origin:
+                raise local.Stop('补发站点与档案记录不一致，或档案未记录站点；请在原来的环境里补发')
             meta = pending_meta
             if clock() >= meta['prepared_at'] + 86400:
                 raise local.Stop('超过 24 小时，服务端已不记得这次请求，不会自动重发；请先用 list 核对是否已经上传成功', code=4)
@@ -429,7 +431,7 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             if command != 'resume':
                 idem = (client.idempotency_key(raw, secrets.token_hex(16) if args.new else '')
                         if command == 'upload' else secrets.token_hex(16))
-                meta = store.prepare(home, command, doc_id, raw, body['sha256'], idem, clock(), title=title, check=check_secret)
+                meta = store.prepare(home, command, doc_id, raw, body['sha256'], idem, clock(), title=title, origin=origin, check=check_secret)
             op, doc_id = meta['op'], meta['doc_id']
             path = '/api/v2/documents' if op == 'upload' else '/api/v2/documents/' + doc_id + '/content'
             try:

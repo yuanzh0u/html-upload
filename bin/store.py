@@ -120,9 +120,9 @@ def record(home, meta, status, now, *, doc=None, error=None, check=None):
         sync_dir(root)
 
 
-def prepare(home, op, doc_id, raw, sha256, idem, now, *, title, check=None):
+def prepare(home, op, doc_id, raw, sha256, idem, now, *, title, origin=None, check=None):
     meta = dict(client_upload_id=secrets.token_hex(16), op=op, doc_id=doc_id,
-                idempotency_key=idem, sha256=sha256, title=title, prepared_at=float(now))
+                idempotency_key=idem, sha256=sha256, title=title, prepared_at=float(now), origin=origin)
     if check is not None:
         check(meta)
         check(canonical(meta))
