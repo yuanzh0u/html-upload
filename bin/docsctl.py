@@ -312,10 +312,12 @@ def manage(api, args, body, origin):
         if problem:
             return 2, 'failed', dict(items=items, count=len(items)), problem
         cursor = page['next_cursor']
-        report = '共 ' + str(len(items)) + ' 篇'
+        report = ('共 ' if args.all else '本页 ') + str(len(items)) + ' 篇'
+        if args.all and len(items) > 50:
+            report += '\n下面列出前 50 篇，完整清单在 data.items'
         report += ''.join('\n' + str(d.get('title', '')) + '：' + str(d.get('url', '')) for d in items[:50])
         if not args.all and cursor:
-            report += '\n还有下一页：加 --cursor ' + cursor + ' 继续，或用 --all 取全部'
+            report += '\n还有下一页：加 --cursor ' + cursor + ' 继续，或用 --all 取全部；请带上同样的筛选条件'
         return 0, 'success', dict(items=items, count=len(items)) if args.all else page, report
     if command == 'tags':
         data = api.get('/api/v2/tags')

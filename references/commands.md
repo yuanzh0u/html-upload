@@ -42,7 +42,7 @@ meta 已有可信 `success: {id, url, title}` 时，核对私有元数据、Key 
 
 `python3 bin/docsctl.py list [--query TEXT] [--tag TAG ...] [--from TIME] [--to TIME] [--sort uploaded_desc|uploaded_asc|title] [--limit N] [--cursor CURSOR | --all]`。
 
-时间是带时区的 RFC 3339，含起点、不含终点；默认 sort 为 uploaded_desc，limit 为 50（1–200）。data 默认 `{items: [元数据], next_cursor}`；`--all` 为 `{items, count}`。`--all` 最多读取 1000 页（默认每页 50 条，最多取得 50000 条；limit=200 时最多 200000 条）；第 1000 页 next_cursor 为空时仍完整成功，否则停止并建议缩小筛选范围。游标重复、重复文档、达到页数上限或异常分页退出 2，data 保留已取得的 `{items, count}`，report 明示不完整，不声称全量成功。退出 0、2。
+时间是带时区的 RFC 3339，含起点、不含终点；默认 sort 为 uploaded_desc，limit 为 50（1–200）。data 默认 `{items: [元数据], next_cursor}`；单页报告写「本页 N 篇」，有下一页时给出 --cursor，并提醒继续翻页或改用 --all 时带上同样的筛选条件。`--all` 为 `{items, count}`，报告写「共 N 篇」；超过 50 篇时注明「下面列出前 50 篇，完整清单在 data.items」，data.items 保留完整清单。`--all` 最多读取 1000 页（默认每页 50 条，最多取得 50000 条；limit=200 时最多 200000 条）；第 1000 页 next_cursor 为空时仍完整成功，否则停止并建议缩小筛选范围。游标重复、重复文档、达到页数上限或异常分页退出 2，data 保留已取得的 `{items, count}`，report 明示不完整，不声称全量成功。退出 0、2。
 
 ## get
 
