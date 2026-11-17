@@ -389,7 +389,9 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             help_parser = sub.choices.get(command, parser)
             help_parser.print_help(file=out)
             return 0
-        home = Path(env.get('HOME', ''))
+        home = Path(env.get('HOME') or Path.home())
+        if not home.is_absolute():
+            raise local.Stop('家目录必须是绝对路径；请设置有效的 HOME 或修正系统家目录配置')
         token = local.credential(env, home)
 
         def check_secret(value):
@@ -410,7 +412,6 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             if contains_key(html, token):
                 raise local.Stop(KEY_CONTENT)
         command = args.command
-        home = Path(env.get('HOME', ''))
         origin = local.origin_from(env)
         if command in MANAGE:
             body = manage_options(args)

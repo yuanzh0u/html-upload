@@ -11,6 +11,8 @@ description: 用户需要上传本机的单个 HTML、拿回链接、替换正�
 
 Key 的配置和平台边界见 [POSIX 凭据](references/credentials-posix.md)、[Windows 凭据](references/credentials-windows.md)；按当前平台读取。站点固定为 `https://docs.zh0uyuan.com`，没有指定站点的参数；`DOCS_ORIGIN` 的 localhost / 127.0.0.1 回环地址仅供隔离测试。
 
+家目录优先使用非空的 `HOME`；未设置或为空时由 Python `Path.home()` 获取。结果必须是绝对路径，否则在读取凭据、创建本地档案或联网前退出 2，并提示修正家目录配置；凭据文件和档案始终使用同一次解析的家目录。
+
 ## 命令速查
 
 参数、返回数据和退出码查 [命令参考](references/commands.md)。`DOC_ID` 是文档 ID，`CLIENT_UPLOAD_ID` 来自失败输出；执行时替换示例值。
