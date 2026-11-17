@@ -93,7 +93,7 @@ def directories(home, create=False):
     return root
 
 
-def record(home, meta, status, now, *, doc=None, error=None):
+def record(home, meta, status, now, *, doc=None, error=None, check=None):
     if status not in STATUSES:
         raise ValueError('manifest 状态不在闭集')
     root = directories(home)
@@ -103,6 +103,9 @@ def record(home, meta, status, now, *, doc=None, error=None):
                url=doc['url'] if doc is not None else None,
                title=doc['title'] if doc is not None else meta['title'], sha256=meta['sha256'],
                at=datetime.fromtimestamp(now, timezone.utc).isoformat().replace('+00:00', 'Z'), error=error)
+    if check is not None:
+        check(row)
+        check(canonical(row))
     with file_lock(root / '.manifest.lock'):
         fd = checked_fd(root / 'manifest.jsonl', os.O_RDWR | os.O_APPEND)
         with os.fdopen(fd, 'a+b') as stream:
@@ -117,24 +120,28 @@ def record(home, meta, status, now, *, doc=None, error=None):
         sync_dir(root)
 
 
-def prepare(home, op, doc_id, raw, sha256, idem, now, *, title):
+def prepare(home, op, doc_id, raw, sha256, idem, now, *, title, check=None):
     meta = dict(client_upload_id=secrets.token_hex(16), op=op, doc_id=doc_id,
                 idempotency_key=idem, sha256=sha256, title=title, prepared_at=float(now))
+    if check is not None:
+        check(meta)
+        check(canonical(meta))
+        check(raw)
     try:
         root = directories(home, True)
         stem = root / '.pending' / meta['client_upload_id']
         exclusive_write(stem.with_suffix('.request.json'), raw)
         exclusive_write(stem.with_suffix('.meta.json'), canonical(meta))
-        record(home, meta, 'prepared', now)
+        record(home, meta, 'prepared', now, check=check)
     except (OSError, Stop):
         raise Stop('本地预备份失败；请求没有发出', code=5) from None
     return meta
 
 
-def finalize(home, meta, now, *, doc=None, error=None):
+def finalize(home, meta, now, *, doc=None, error=None, check=None):
     try:
         record(home, meta, ('uploaded' if meta['op'] == 'upload' else 'replaced') if doc is not None else 'failed',
-               now, doc=doc, error=error)
+               now, doc=doc, error=error, check=check)
     except (OSError, Stop):
         raise Stop('本地记录失败；请用 resume 恢复', code=4) from None
     try:

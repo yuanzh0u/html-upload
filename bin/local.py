@@ -8,6 +8,7 @@ import stat
 from fields import MAX_HTML, MAX_SOURCE_INFO, FieldError, clean_title
 
 PRODUCTION = 'https://docs.zh0uyuan.com'
+KEY_CONTENT = '要发送的内容里出现了你的 API Key，已停止。请先删掉再试。'
 KEY_GUIDANCE = '登录后打开 https://docs.zh0uyuan.com/keys（「API Key」页面）生成或重新生成 Key，明文只显示一次；不要把 Key 贴进聊天，也不要写进带明文的命令或 shell history'
 
 
@@ -74,7 +75,7 @@ def credential(env, home):
     return token
 
 
-def read_html(path):
+def read_html(path, *, forbidden=None):
     try:
         path = Path(path)
         info = path.lstat()
@@ -85,10 +86,22 @@ def read_html(path):
             opened = os.fstat(stream.fileno())
             if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
                 raise Stop('源文件在打开前发生变化')
-            data = stream.read(MAX_HTML + 1)
+            data = bytearray()
+            needle = forbidden.encode() if forbidden else None
+            tail = b''
+            while chunk := stream.read(65536):
+                if needle:
+                    if needle in tail + chunk:
+                        raise Stop(KEY_CONTENT)
+                    tail = (tail + chunk)[-(len(needle) - 1):]
+                if len(data) <= MAX_HTML:
+                    data.extend(chunk[:MAX_HTML + 1 - len(data)])
+                # Without a credential screen there is no reason to scan excess bytes.
+                if not needle and len(data) > MAX_HTML:
+                    break
         if len(data) > MAX_HTML:
             raise Stop('HTML 超过 2 MiB')
-        return data
+        return bytes(data)
     except OSError:
         raise Stop('本地 HTML 无法安全读取') from None
 

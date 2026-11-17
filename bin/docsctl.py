@@ -17,17 +17,44 @@ import local
 import store
 
 
+KEY_CONTENT = local.KEY_CONTENT
+
+
+def contains_key(value, token):
+    if not token:
+        return False
+    if isinstance(value, bytes):
+        return token.encode() in value
+    if isinstance(value, str):
+        return token in value
+    if isinstance(value, dict):
+        return any(contains_key(k, token) or contains_key(v, token) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(contains_key(v, token) for v in value)
+    return False
+
+
+def redact(value, token):
+    if isinstance(value, str):
+        return value.replace(token, '[已隐藏]') if token else value
+    if isinstance(value, dict):
+        return {redact(k, token): redact(v, token) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact(v, token) for v in value]
+    return value
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
 
 
 class Parser(argparse.ArgumentParser):
     def error(self, message):
-        raise local.Stop('参数错误：' + message)
+        raise local.Stop('参数错误，请检查命令和参数')
 
 
 def build_parser():
-    parser = Parser()
+    parser = Parser(prog='docsctl.py')
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('me')
     for name in ('upload', 'replace'):
@@ -272,9 +299,36 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
     token = env.get('DOCS_API_KEY', '')
     meta = None
     last = None
+    write_sent = False
     code, status, data, report = 2, 'failed', error_data(), ''
     try:
-        args = build_parser().parse_args(argv)
+        parser = build_parser()
+        help_args = argv[:argv.index('--')] if '--' in argv else argv
+        if any(value in ('-h', '--help') for value in help_args):
+            sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+            help_parser = sub.choices.get(command, parser)
+            help_parser.print_help(file=out)
+            return 0
+        home = Path(env.get('HOME', ''))
+        token = local.credential(env, home)
+
+        def check_secret(value):
+            if contains_key(value, token):
+                raise local.Stop(KEY_CONTENT)
+
+        if contains_key(argv, token):
+            raise local.Stop(KEY_CONTENT)
+        args = parser.parse_args(argv)
+        if getattr(args, 'summary_file', None) is not None:
+            summary_bytes = Path(args.summary_file).read_bytes()
+            if contains_key(summary_bytes, token):
+                raise local.Stop(KEY_CONTENT)
+            args.summary = summary_bytes.decode('utf-8')
+            args.summary_file = None
+        if args.command in ('upload', 'replace'):
+            html = local.read_html(args.html, forbidden=token)
+            if contains_key(html, token):
+                raise local.Stop(KEY_CONTENT)
         command = args.command
         home = Path(env.get('HOME', ''))
         origin = local.origin_from(env)
@@ -293,7 +347,6 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             else:
                 doc_id = fields.clean_doc_id(args.doc_id)
                 title = '替换文档'
-            html = local.read_html(args.html)
             inspected = local.inspect_html(html)
             body = dict(summary=summary, html_base64=base64.b64encode(html).decode('ascii'),
                         sha256=hashlib.sha256(html).hexdigest())
@@ -304,22 +357,34 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                 body.update(title=title, source_info=local.build_source_info(inspected, Path(args.html)))
                 if tags:
                     body['tags'] = tags
-            token = local.credential(env, home)
+            if contains_key(body, token):
+                raise local.Stop(KEY_CONTENT)
             raw = canonical(body)
             if len(raw) > fields.MAX_BODY:
                 raise local.Stop('JSON 请求体超过大小上限')
         elif command == 'resume':
-            meta, raw = store.load_pending(home, args.client_upload_id)
+            pending_meta, raw = store.load_pending(home, args.client_upload_id)
+            archived = json.loads(raw)
+            if (contains_key(pending_meta, token) or contains_key(archived, token) or
+                    contains_key(base64.b64decode(archived['html_base64']), token)):
+                raise local.Stop(KEY_CONTENT)
+            meta = pending_meta
             if clock() - meta['prepared_at'] > 86400:
                 raise local.Stop('超过 24 小时，服务端已不记得这次请求，不会自动重发；请先用 list 核对是否已经上传成功', code=4)
-            token = local.credential(env, home)
-        else:
-            token = local.credential(env, home)
 
         def capture(*a, **kw):
-            nonlocal last
+            nonlocal last, write_sent
             last = None
+            # A response cursor must never become a credential-bearing URL.
+            from urllib.parse import unquote_plus
+            if contains_key(unquote_plus(a[1]), token):
+                raise local.Stop(KEY_CONTENT)
+            if len(a) > 4:
+                check_secret(a[4])
+            if a[0] != 'GET':
+                write_sent = True
             result = (transport or client.http_request)(*a, **kw)
+            result = tuple(redact(v, token) for v in result)
             last = result
             return result
 
@@ -335,7 +400,7 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             if command != 'resume':
                 idem = (client.idempotency_key(raw, secrets.token_hex(16) if args.new else '')
                         if command == 'upload' else secrets.token_hex(16))
-                meta = store.prepare(home, command, doc_id, raw, body['sha256'], idem, clock(), title=title)
+                meta = store.prepare(home, command, doc_id, raw, body['sha256'], idem, clock(), title=title, check=check_secret)
             op, doc_id = meta['op'], meta['doc_id']
             path = '/api/v2/documents' if op == 'upload' else '/api/v2/documents/' + doc_id + '/content'
             try:
@@ -343,14 +408,14 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                 if 200 <= remote_status < 300:
                     if not trusted(value, origin, doc_id):
                         raise client.RemoteUnknown()
-                    store.finalize(home, meta, clock(), doc=value)
+                    store.finalize(home, meta, clock(), doc=value, check=check_secret)
                     code, status, data = 0, 'success', value
                     report = success_report(value, op, remote_status)
                 elif 400 <= remote_status < 500 or remote_status == 507:
                     data = error_data(remote_status, value)
                     report = client.describe(remote_status, value, headers)
                     try:
-                        store.finalize(home, meta, clock(), error=data['error'])
+                        store.finalize(home, meta, clock(), error=data['error'], check=check_secret)
                     except local.Stop:
                         report += '；本地记录失败，远程已明确拒绝，请核对本地档案'
                     if op == 'upload' and remote_status == 404:
@@ -359,7 +424,7 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                     raise client.RemoteUnknown()
             except client.RemoteUnknown:
                 try:
-                    store.record(home, meta, 'remote_unknown', clock())
+                    store.record(home, meta, 'remote_unknown', clock(), check=check_secret)
                 except (OSError, local.Stop):
                     pass
                 raise local.Stop('写操作结果未知', code=4) from None
@@ -372,8 +437,23 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             resume = 'python3 bin/docsctl.py resume ' + meta['client_upload_id']
             data = dict(client_upload_id=meta['client_upload_id'], resume_command=resume)
             report += '\n' + resume
+    except Exception as error:
+        code = 4 if meta is not None or write_sent else 2
+        status = 'remote_unknown' if code == 4 else 'failed'
+        data = error_data()
+        report = type(error).__name__
+        if meta is not None:
+            try:
+                store.record(home, meta, 'remote_unknown', clock(), check=check_secret)
+            except Exception:
+                pass
+            resume = 'python3 bin/docsctl.py resume ' + meta['client_upload_id']
+            data = dict(client_upload_id=meta['client_upload_id'], resume_command=resume)
+            report += '\n' + resume
+        elif write_sent:
+            report += '\n结果未知，请用 python3 bin/docsctl.py get ' + args.doc_id + ' 核对'
     result = dict(ok=code == 0, command=command, status=status, exit_code=code, data=data, report=report)
-    text = json.dumps(result, ensure_ascii=False)
+    text = json.dumps(redact(result, token), ensure_ascii=False)
     if isinstance(token, str) and token:
         text = text.replace(token, '[已隐藏]')
     out.write(text + '\n')
