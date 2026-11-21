@@ -1,144 +1,86 @@
 ---
 name: html-upload
-description: >-
-  把已经存在的合规 HTML 文件只读上传到 docs 服务（https://docs.zh0uyuan.com）。
-  做上传前检查、API Key 引导、taxonomy 确认、提交、本地备份和结果报告。
-  用户要「上传这个 HTML」「传到 docs」「html-upload」时使用。
-  不生成 HTML，不改 docs-service，不重建索引。
+description: 用户需要上传本机的单个 HTML、拿回链接、替换正文、查清单、改标题、摘要和标签、收藏或删除时使用；包括「上传这个 HTML」「传到 docs」「更新那篇」「删掉那篇」。不生成 HTML，不读正文。
 ---
 
-只读检查已有本地 HTML，确认元数据后上传到 docs，保存本地副本并报告结果。
+# HTML 上传与维护
 
-## 触发条件与边界
+## 依赖与前提
 
-用户给出本地 `.html` 路径，要求上传、发布到 docs，或点名 html-upload 时使用。没有文件时停止并索取路径；不临时生成文件。
+依赖契约 docs-api v2；工具先检查主版本，不符时报错退出，不降级。需要 `python3` 3.12 或以上，只用标准库。以下命令从技能目录执行。
 
-不生成 HTML、不改服务端、不重建索引。不要建设 html-trans、html-spec；不调用或修补 html-studio。不修改 docs-service 的任何文件、上传校验、CSP、sandbox、索引或线上配置；不处理 M-3、A-15/M-6、P7。不接受 ZIP、服务端路径、用户指定 docid 或 storage_key；原 HTML 不修改、不删除。
+Key 的配置和平台边界见 [POSIX 凭据](references/credentials-posix.md)、[Windows 凭据](references/credentials-windows.md)；按当前平台读取。站点固定为 `https://docs.zh0uyuan.com`，没有指定站点的参数；`DOCS_ORIGIN` 的 localhost / 127.0.0.1 回环地址仅供隔离测试。
 
-生产 origin 固定为 `https://docs.zh0uyuan.com`。拒绝对话里的其他上传域名，不跟随重定向。测试可通过进程环境 `DOCS_ORIGIN` 指向 HTTP/HTTPS 的 `127.0.0.1` 或 `localhost`（可带端口）；拒绝其余值。不提供 base-url 参数。
+家目录优先使用非空的 `HOME`；未设置或为空时由 Python `Path.home()` 获取。结果必须是绝对路径，否则在读取凭据、创建本地档案或联网前退出 2，并提示修正家目录配置；凭据文件和档案始终使用同一次解析的家目录。
 
-只调用 `/api/v1/me`、`/api/v1/taxonomy?include=aliases,counts` 和创建文档接口；不查文档列表、不查通讯录、不改已有 ACL、不管理用户。请求 ACL 只作用于这一次创建。
+## 命令速查
 
-## 入口与流程
-
-从技能目录运行，使用 Python 3.12 标准库，不安装第三方包：
+参数、返回数据和退出码查 [命令参考](references/commands.md)。`DOC_ID` 是文档 ID，`CLIENT_UPLOAD_ID` 来自失败输出；执行时替换示例值。
 
 ```bash
-python3 bin/upload.py /absolute/path/existing.html --project-name '用户指定的项目' --type-name '用户指定的类型' --dry-run --non-interactive
+python3 bin/docsctl.py me
+python3 bin/docsctl.py upload ./report.html --summary '用户提供的摘要' --tag '用户标签'
+python3 bin/docsctl.py replace DOC_ID ./report.html --summary-file ./summary.txt --share-friend '张三'
+python3 bin/docsctl.py resume CLIENT_UPLOAD_ID
+python3 bin/docsctl.py list --all
+python3 bin/docsctl.py get DOC_ID
+python3 bin/docsctl.py edit DOC_ID --title '新标题'
+python3 bin/docsctl.py favorite DOC_ID
+python3 bin/docsctl.py unfavorite DOC_ID
+python3 bin/docsctl.py delete DOC_ID
+python3 bin/docsctl.py tags
 ```
 
-`bin/upload.py` 是唯一上传入口，不使用另一条 curl 上传捷径。完整顺序：读原字节 → 本地校验 → 取 Key → GET me → 拉 taxonomy → 精确匹配 → 必要时汇总暂停等待用户确认 → 外链提示 → 预备份与 prepared manifest → POST → 验证响应 → 本地收尾 → 报告。dry-run 也做本地校验、凭证自检、taxonomy 与外链扫描。
+上传标题优先使用显式 `--title`，其次为 `hx:title` meta，最后为唯一页面 `<title>`；SVG、MathML 的图题不算页面标题。多个页面 `<title>` 即使同名或存在 meta 也必须提供 `--title`；标题先合并连续空白并去掉首尾空白，再校验 1–200 字；拒绝剩余 Cc 控制字符、Cs 代理字符、U+202A–U+202E、U+2066–U+2069，以及 U+200B、U+2060、U+FEFF。其他 Cf 字符允许，包括 emoji 的 ZWJ、ZWNJ 与软连字符。
 
-本地模块：[normalize.py](bin/normalize.py)、[check_html.py](bin/check_html.py)、[match_taxonomy.py](bin/match_taxonomy.py)。它们不请求网络，HTML 检查器可独立输出 JSON。
+## 摘要规则
 
-## 输入参数
+上传、替换必须提供纯文本摘要，目标 100–300 字，硬上限 1000 字（Unicode 字符）；用户给了摘要就用用户的。没有摘要时，依据已有的内容上下文概括用途、主要内容和结论；上下文不足就请用户提供摘要，不通过读取远端正文补齐。
 
-`html` 位置参数必填，为本地普通 `.html` 文件。未知参数退出 2。用 `python3 bin/upload.py --help` 查看入口。
+不要照抄页面开头的导航、标题、目录或样板文字；不要写入 Key、手机号等敏感信息。`--summary` 与 UTF-8 的 `--summary-file` 二选一；摘要文件先检查原始字节不含 Key，再把 CRLF 规整为 LF。以 `-` 开头的选项值使用等号，例如 `--summary=-x`。
 
-| 参数 | 默认与规则 |
-|---|---|
-| `--title` | 无默认；与 HTML title 不同则澄清，禁止从文件名补标题 |
-| `--project-id` / `--project-name` | 互斥；运行时匹配 taxonomy |
-| `--category-id` / `--category-name` | 互斥；只供新建项目，不默认「其他」 |
-| `--type-id` / `--type-name` | 互斥；type 没有 category |
-| `--model-id` / `--model-name` | 互斥；不猜执行者所用模型 |
-| `--generated-at` | 带时区 RFC3339；缺失、缺时区或冲突须澄清 |
-| `--visibility` | `private`；可选 restricted/public，公开必须显式传入 |
-| `--acl-user` / `--acl-group` | 可重复，仅 restricted；最多 32 用户、16 组，至少一个目标 |
-| `--force-confirm` | 整单确认，不改变匹配，不默认批准新建 |
-| `--dry-run` | 优先于提交；只展示计划，不写 pending、确认快照或 manifest，不产生 docid |
-| `--confirm-file` | 恢复暂停计划的用户确认 JSON，按下文核验 |
-| `--non-interactive` | Agent 调用时显式使用；stdin 非 tty 也视为非交互 |
-| `--resume CLIENT_UPLOAD_ID` | 从私有 pending 恢复原请求；可信成功档案只做本地收尾 |
+## 标签与分享规则
 
-标题若显式给出，必须为 1–200 码位，与 strip 后相同，不含 Cc/Cf/Cs。taxonomy id 规则为 `[0-9A-Za-z_-]{1,64}`。private/public 的 ACL 列表必须为空；ACL 仅接受已有 user id/group id，不把显示名、手机或邮箱转换成 id。禁止将 me.user_id 加入 acl-user；不调用 directory 猜 id。
+只用用户给出的标签，不推断或自行分类。`--tag` 可重复；`edit --tag` 整体替换标签，`--clear-tags` 清空，不指定就不改。最多 20 个标签，每个 1–40 字，仅去首尾空白、按原样大小写去重。
 
-## 凭证安全
+只向用户指定的对象分享；`--share-friend` 与 `--share-group` 可重复，各最多 50 个名称，去首尾空白后精确匹配。链接需登录且在分享范围内才能打开；首次新建成功且无分享对象时只有本人能看。替换未追加对象时已有分享保持不变。上传重放的分享报告来自首次请求，当前分享范围可能已变化，需到网页核对。分享部分失败仍可能上传成功，以 report 中逐项结果为准。
 
-来源顺序严格为：已设置的 `DOCS_API_KEY`（空字符串也不回退）→ `~/.config/docs/api-key` → 打印引导并退出 2。本进程不在聊天里索取 Key，失败后不切换来源。不用 OpenClaw secrets、Publishable Key、shell history 或聊天粘贴。
+## 结果转述与退出码
 
-文件读取前 lstat：普通文件、当前 euid、恰好 0600、非符号链接；父目录 `~/.config/docs` 恰好 0700 且非符号链接。权限不符则本轮停止，不改好权限后当轮继续。规整只去尾部 CR/LF（兼容 Windows CRLF），token 最短 16；其余空白、空内容、超长值拒绝。
+正常调用 stdout 只有一个 JSON 对象：`ok`、`command`、`status`、`exit_code`、`data`、`report`。把 report 原样转述给用户，不要把部分成功说成全部成功。`data` 保留服务端 UTC，report 使用本机时区；有效时间在本机转换溢出时显示原始时间字符串，不影响已确认的成功。错误对应的用户建议查 [错误参考](references/errors.md)。
 
-Key 不进入 argv、URL、输出、日志、异常、pending、manifest、报告或测试快照。不显示前缀、后缀、任何片段；不打印请求头，不启用 HTTP 调试。不教用户把明文 export 写到 shell 启动文件。只有当前进程内存中的 token 进入 Authorization，请求完成后释放局部引用。
+| 退出码 | 含义与 Agent 行动 |
+| --- | --- |
+| 0 | 成功；原样转述 report，包括链接、分享结果和到期说明。 |
+| 2 | 参数、文件、凭据、契约不兼容、远端明确拒绝、只读失败，或替换的正文版本已变化/原始版本缺失；按 report 修正，不声称已完成。 |
+| 3 | 删除预览，需要用户确认；未作修改，展示 report 并取得明确同意。 |
+| 4 | 写操作远端结果未知，或远端成功而本地记录失败；上传、替换用输出的 resume 命令恢复；未过期补发档案的账户/当前元数据查询失败也退出 4，保留档案和恢复命令；已过期则按下述作废规则清档，不提供 resume 命令。其他写操作用 get 核对，不盲目重做。 |
+| 5 | 本地预备份失败，请求没有发出；按 report 处理本地问题后再执行。 |
 
-找不到 Key 时逐字使用：
+resume 会先安全读取 manifest 中该客户端 ID 的最后一条已定结果，不联网：uploaded/replaced 退出 0 并给出链接，failed/abandoned 退出 2 且不提供补发命令；成功记录仍核对 Key、文档 ID 与当前站点链接。没有已定结果时才按档案规则恢复。
 
-> 登录 https://docs.zh0uyuan.com，进入控制台 → 我的文档视图 → API Key，创建后明文只显示一次。现行页面地址是 https://docs.zh0uyuan.com/console/keys 。不要把 Key 贴进聊天，不要写进带明文的命令或 shell history。
+本地 manifest 尾行缺换行时会加锁补换行后继续，并输出不含损坏内容的固定警告；读取跳过损坏行。预备份失败会清理本次创建的文件，保留原有档案；退出 5 表示写请求未发送。
 
-## 操作系统分派
+服务端确认成功或补发清单命中后，先把文档 ID、链接和标题原子记入私有 meta，再追加 manifest。本地记录失败时退出 4，但 data 和 report 仍保留 ID 与链接，并说明「文档已经上传成功：<url>；本地记录没写进去，用 resume 补记」。按输出执行 resume；已有可信 success 的档案只在核对站点、Key 和元数据后离线补记并清档，不查询账户、清单或正文版本，不重发；请求文件已在上次清理中删除也可补记。若成功元数据本身未能落盘，输出仍保留已知成功结果，后续 resume 按正常恢复规则核对。
 
-POSIX 读 [credentials-posix.md](references/credentials-posix.md)。bash/zsh 核心用假值和临时家目录自检；zsh 不使用 bash 的 read 提示参数。真实终端 `/dev/tty` 版仍标「待终端复跑」，不能当作已验证引导。
+## 替换、维护与删除
 
-Windows 先读 [credentials-windows.md](references/credentials-windows.md)。当前 `verified: no`：打印「凭证引导尚未在本 PowerShell 版本验证」并退出 2，不改跑 POSIX、不写 manifest。没有真实 PowerShell 实验就不添加命令或改 verified。
+更新已有页面正文时，用 replace，不要另传一篇。替换不改链接、标题或标签；到期时间重新起算，分享只追加、不移除；收藏中仍不过期。改标题、摘要、标签用 edit，收藏与取消收藏用相应命令。取消收藏后有 24 小时宽限，新的到期时间见 report。
 
-## GET me 自检
+单页 list 报告写「本页 N 篇」；有下一页时按报告的 --cursor 继续，并带上同样的筛选条件，改用 --all 时也保留筛选条件。`list --all` 报告写「共 N 篇」；超过 50 篇时只展示前 50 篇并提示「下面列出前 50 篇，完整清单在 data.items」，完整结果从 data.items 读取。
 
-预备份和 POST 前先 GET `/api/v1/me`，dry-run 也执行。必须 200、kind 为 api_key，user_id/display_name/role 为字符串，scopes 含 me:read、taxonomy:read、documents:create。角色只展示，不据此调用管理接口。
+`list --all` 最多读取 1000 页；第 1000 页仍有后续游标时退出 2，保留已取得的数据并明确结果不完整，请缩小筛选范围。
 
-响应没有 Key 到期时间、上传限额、allow_public。必须输出「服务端未返回 Key 有效期。」和「服务端未返回上传限制。」；不补假字段，不猜 public 是否获准。401/403 不重试、不回退，指向 `/console/keys` 修正或重建。连接 10 秒、读取 30 秒，验证 TLS，无 Cookie，无重定向；细节见 [protocol.md](references/protocol.md)。
+上传与替换的请求体将标签、好友名、群名按原样字符串排序，不改变大小写或 Unicode 形式；仅调整这些名单的输入顺序不会改变上传幂等键。24 小时内完全相同的上传内容和参数会返回同一篇；原文档已删除时不会自动另建。只有本次 upload 的第一次实际上传请求就收到 200 时才提示重复内容与 --new；自动重试后或 resume 收到 200 按上传成功报告，不提示另建，仍说明分享报告是历史结果。只有用户确认要另起一篇时才加 --new。网络中断、暂时性 5xx 或不可信响应会使写入结果未知；其后收到明确错误也不能推翻先前可能已生效的结果。只有可信的成功响应才能确定成功；有效待补发档案同样保留先前的不确定性，需要时先用 list/get 核对。未知结果使用 resume 恢复：上传补发前先按原标题查询清单，起点为 prepared_at 往前 48 小时（UTC），翻完全部页并校验分页；标题完全相同且 size_bytes 等于档案中 HTML 正文字节数时，记 uploaded 并清档，报告「补发前在清单里找到了同一篇，没有重复发送」，不再发送。未过期时，清单不完整或查询失败则保留未知结果与恢复命令；查无匹配才按原期限原样重发同一请求。超过 24 小时的上传档案也先做这次只读查找；档案会记录目标站点，补发站点不一致或记录缺失时退出 2，提示「请在原来的环境里补发」，不联网并保留档案；替换还会在准备前保存正文版本，补发前再次核对；版本已变化则退出 2，记 failed/superseded 并删除档案，不再补发，按 report 用 get 核对，需要时重新 replace。缺少准备时正文版本的旧档案不能安全补发，退出 2 并保留档案，不要补填当前版本；超过 24 小时不自动重发。档案与恢复规则查 [本地记录](references/manifest.md)。
 
-## HTML 与 meta 校验
+慢速上传的整体发送时间可以超过 30 秒；每个正文发送块和响应读取仍有 30 秒 socket 超时。超时后按输出的恢复说明处理，完整传输规则见 [错误参考](references/errors.md)。
 
-原字节只读，大小 1–10 MiB，严格 UTF-8，拒绝 BOM/NUL；仅去起始空格/TAB/CR/LF 后以 doctype html 或 html 开头，必须含结束 html。符号链接、目录、非常规文件拒绝；字节错误退出 2，不当作元数据澄清。
+删除必须先不带 --yes 预览，把永久删除、所有人立即无法打开且不能恢复的影响告诉用户；得到用户明确同意后才加 --yes。删除结果未知时先 get 核对。
 
-用 html.parser 提取 title、plans:completed、plans:worker；忽略注释、script/template 内干扰，不执行脚本。相同 meta content 合并，不同 content 不投票、不擅选；参数与 title/meta 冲突均要确认。带时区时间转 UTC 并保留小数秒；缺时区不补机器时区、不用上传时间填生成时间。worker 只是模型名称候选；未命中时询问它是模型名还是执行者名称，不能直接新建。
+## 不要做的事
 
-`metadata_source` 仅有 time/model，值限 html_meta/explicit/confirmed。细节与时间、标题澄清项由 [check_html.py](bin/check_html.py) 产生；匹配与确认规则见 [confirmation.md](references/confirmation.md)。
+不要绕过本工具直接请求接口；不生成 HTML、不读远端正文，不修改源文件。不要将 Key 放入参数、URL、输出、日志、异常、本地记录或上传内容。不要让用户把 Key 贴进聊天；工具会拒绝含当前 Key 的原始 HTML、摘要文件以及待发送内容，也检查 URL 编码和最终 JSON 请求字节；不会改写待重发的请求来脱敏，先让用户移除敏感内容再试。不要为恢复修改 pending 档案或生成新幂等键；不要在测试中访问生产站点或真实凭据、真实档案。
 
-## taxonomy 匹配与确认状态机
+从 prepared_at 起满 24 小时的未定结果档案记 abandoned 并删除两份 pending；不提供 resume_command。upload resume 仍先做只读清单查找，命中按成功处理；未命中、查询失败或不完整则作废。已过期 replace 直接作废；账户/版本/清单查询、传输或重试等待期间到期，也不再发送。退出 4 的固定报告为「超过 24 小时，服务端已不记得这次请求，不会重发；请用 list 核对，确认没有成功的话，重新执行 upload/replace」。每次普通命令在业务联网前顺带清理其他安全有效的过期档案，清理本身不联网；当前 resume 先排除，保留其站点/Key 核对、只读查找和已知成功离线补记。已知 success 不改记 abandoned，不安全、损坏、含当前 Key 或站点不符的成功档案不自动清理。作废不表示远端失败，按报告先核对，确认后再重新操作。
 
-先拉 taxonomy，使用响应 version 和 selectable_for_upload。顺序：稳定 id → 规范名 → 活动别名；命中只送 id。近似名只作候选，不自动复用；候选超过扫描界限时请用户给规范名或 id。不可选项目不能因同名就悄悄新建自己的项目。
-
-全部命中、元数据齐全、无冲突、无 force-confirm 时用 existing_default，new_terms 为空，直接提交。任一新项、缺失、冲突、worker 歧义或 force-confirm 均用 explicit，一次汇总暂停。Agent 必须把退出码 3 的 JSON 给用户，不能代替用户确认，不能将超时、空输入或一句泛泛的 yes 当作逐项新建许可。
-
-确认快照只保存于 `~/docs/.confirm/<client_upload_id>.plan.json`（目录 0700、文件 0600，不含 Key 或 HTML 正文）。确认文件必须绑定同一个 client_upload_id、plan_sha256，accepted 必须为 true；逐项 choices 决定 reuse/id 或 create/name/create_confirmed。标题、时间冲突要选定 value；缺时区要明确 timezone。以同一组原参数加 `--confirm-file` 再运行。格式示例见 [confirmation.md](references/confirmation.md)。
-
-新建时间戳来自恢复时的 UTC 时钟，逐项 new_terms 只记录实际新建词的 kind、规范键、confirmed_at；窗口为过去 7 天到未来 5 分钟。改名、改候选、改输入或 taxonomy 改变后重新确认，不复用旧批准。422 会刷新 taxonomy，把服务端候选/继任 id 并入新清单，再次暂停；不自动 create_confirmed 或自动改挂继任。
-
-## 提交协议与幂等
-
-读 [protocol.md](references/protocol.md)，不要从设计示意另造协议。正文含 sha256 与原字节的标准 Base64；ACL 始终显式发送。使用 urllib 与 JSON，固定 Origin、Content-Length（上限 14046552），禁用分块和重定向。
-
-client_upload_id 与 Idempotency-Key 分别生成，不能共用。请求哈希遵守 docs-upload/v1 算法；原始 POST JSON 保存为 .request.json。超时、503、429、处理中只复用原键、原正文（包含 confirmed_at），不重新序列化。用户改内容或 422 后重新选择才另开逻辑上传。409 idempotency_conflict 停止，禁止为了绕开冲突换键自动再传。
-
-成功响应必须可信：201 首次或 200 重放、32 hex id、同 origin 的精确 url、匹配 sha256、uploaded_at、acl_version 与 normalized_metadata。缺字段或哈希不符按 remote_unknown 处理，不伪造 docid。
-
-## 备份与 manifest
-
-读 [manifest.md](references/manifest.md)。备份根是本机 `~/docs`，不是 `/srv/docs`。POST 前独占写入 .pending 下的 html、原请求和 meta，fsync 并回读验证哈希，再锁定追加 prepared manifest；任一步失败不 POST。目录 0700、文件 0600，拒绝符号链接。
-
-成功后原子移到 `<docid>.html`；已有同哈希副本不覆盖，冲突不覆盖、不删除 pending。manifest 是逐行 JSONL，锁定、flush、fsync，状态只用六个约定值。成功标签与时间采用服务端 normalized_metadata；permission 是上传快照，不代表实时 ACL。
-
-退出码 4 时不新开逻辑上传。恢复入口：
-
-```bash
-python3 bin/upload.py /original/source.html --resume CLIENT_UPLOAD_ID --non-interactive
-```
-
-恢复从原 request/meta/pending 读原字节与原幂等键，不依赖原源文件仍存在；该位置参数只保留入口形状。不要加改变元数据的参数来修改这次请求。远程结果已可信时不 POST，只做本地收尾并追加 reconciled。远程未知时先自检，再按原请求取回原 docid；预算跨进程保存。修好磁盘后人工运行恢复，不自动无限续跑。
-
-## 错误恢复
-
-按 [protocol.md 的错误恢复表](references/protocol.md) 分支，不混用 409 的处理方式。401/403、413、不可重试 4xx 停止；429 按 Retry-After 有界等待，503/网络失败指数退避加抖动；重试次数和等待时间写 meta。未知结果保留 pending 与原键。远程成功、本地失败必须说「远程已成功、本地待修复」，列链接、docid、pending、目标和 manifest 最后状态，不再创建第二篇。
-
-| 退出码 | 含义与 Agent 动作 |
-|---|---|
-| 0 | 上传完成，或 dry-run 展示完成；按模板报告 |
-| 2 | 参数、文件、凭证或确定拒绝；停止，不换键盲试 |
-| 3 | 将单个合法 JSON 清单交给用户，等待逐项确认文件 |
-| 4 | 远程未知或远程成功、本地未完成；原请求恢复或仅本地修复 |
-| 5 | 预备份/manifest 失败且本次 POST 未发；先修本地磁盘权限 |
-
-## 外链提示
-
-读 [external-links.md](references/external-links.md)。只扫描，不探测 URL，不改正文、不拒绝上传、不改服务端。外链相关响应警告字段不新增、不修改。M-3 不在此技能处理。
-
-确认清单与最终报告必须整段抄用 [confirm-prompt.txt](templates/confirm-prompt.txt) 对应文案，不改写。有命中时列最多 20 个 URL 与总条数；无命中也给出固定提示。提示本身不增加强制确认。
-
-提交时 stdout 先输出 JSON 的 external_links 字段并 flush（POST 前可见），随后补齐结果为一个合法 JSON；report 字符串承载报告小标题。这样 422 刷新时 stdout 仍是可解析的单份确认计划，不能把前缀当作完整结果。
-
-## 最终报告
-
-只填 [report.txt](templates/report.txt)，按 [report.md](references/report.md) 的状态表转述。成功、失败、暂停和 dry-run 都保留状态、线上链接、docid、本地副本、manifest、外链提示、待办；缺项写「无」。dry-run 必须说「未提交，没有 docid」。JSON 结果中的 report 为完整报告文本，self_check 为允许展示的自检字段。
-
-报告与 Agent 转述不包含 API Key、Authorization、配置文件内容或幂等键；幂等键仅留在私有 meta 中，恢复由技能读取。日志写不出就说「日志没写上」，不能声称事件已入账。
+恢复期间持有对应档案的跨进程私有锁，直至成功补记、作废或保留未知结果处理结束；其他命令的启动清理非阻塞地跳过忙碌档案，稍后运行再清理。清理在读取档案前取得同一把锁，不会用旧快照把已经确认成功的记录改成 abandoned。

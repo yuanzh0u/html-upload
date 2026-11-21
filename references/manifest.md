@@ -1,101 +1,79 @@
-# 本地备份与 manifest
+# 本地记录与恢复
 
-`~/docs/` 是 Agent 这台机器上的备份根。它不是 VPS 的 `/srv/docs`。原 HTML 不删除、不修改。
+只读源 HTML，不留成功正文副本。上传与替换发请求前，工具先保存可恢复的待处理档案；失败退出 5 时没有发出该写请求。
 
-### 8.1 目录与权限
-
-- `~/docs` 与 `~/docs/.pending`：创建为 `0700`，拒绝符号链接。
-- 文件 `0600`。
-- manifest 也是 `0600`，因为里面有标题和 ACL 快照。
-
-本地预备份失败（磁盘、权限、哈希对不上）：退出码 5，不 POST。
-
-### 8.2 POST 之前
-
-`client_upload_id` 是 32 位小写十六进制。
-
-1. 独占创建 `~/docs/.pending/<client_upload_id>.html`，写入与源文件相同的字节，`fsync`，再读回比对 SHA-256。
-2. 独占创建 `~/docs/.pending/<client_upload_id>.request.json`，内容是将要 POST 的原始 JSON 字节，`fsync`。
-3. 独占创建 `~/docs/.pending/<client_upload_id>.meta.json`，`0600`，含幂等键、请求哈希、`attempt`、标题与标签、ACL 快照、源路径。不含 API Key。`fsync`。
-4. 按 §8.4 追加一条 `prepared`。`fsync` manifest。
-5. 然后才 POST。
-
-第 4 步失败：不 POST。退出码 5。已写的 pending 保留。报告「预备份在，manifest 没写上」。
-
-dry-run 不做这五步。
-
-### 8.3 成功之后
-
-响应可信之后：
-
-- 目标 `~/docs/<docid>.html` 不存在：把 pending 的 html `os.replace` 到该路径（同一目录所在文件系统，原子换名）。再读回比对 SHA-256。然后 `fsync` 所在目录。这是换名，不是把字节丢掉。
-- 目标已存在且哈希相同：不覆盖。pending 留在原地。`backup_filename` 仍写 `<docid>.html`。
-- 目标已存在且哈希不同：不覆盖，不删除 pending，不删除目标。状态 `local_finalize_failed`。退出码 4。报告原文必须含「远程已成功、本地待修复」。禁止再 POST。
-
-无论远程还是本地后处理失败，都不删除已写好的本地副本，也不要求服务端删除已成功的文档。
-
-无 docid 的失败：pending 保留，manifest 里 `docid` 为 null。不编一个本地 id 充当 docid。
-
-客户端不自动清理 `.pending` 的请求与元数据档案（只增不减）；请定期人工核对终态后归档，保留未完成上传的恢复材料。
-
-### 8.4 manifest.jsonl
-
-路径 `~/docs/manifest.jsonl`。追加式，一行一个 JSON 对象，行尾一个 `\n`。它不是 JSON 数组。
-
-写入时对 `~/docs/.manifest.lock` 加独占锁（POSIX 用 `fcntl.flock`）。写入、flush、`fsync` 之后解锁。Windows 在 §3.5 未验证前不写 manifest，技能直接退出码 2。
-
-`schema_version` 固定为 `1`。每次尝试一行。字段：
-
-| 字段 | 语义 |
-|---|---|
-| `schema_version` | `1` |
-| `event_id` | 32 位十六进制，本行唯一 |
-| `client_upload_id` | 逻辑上传 |
-| `attempt` | 从 1 递增的发送尝试 |
-| `status` | `prepared`、`upload_failed`、`remote_unknown`、`uploaded`、`local_finalize_failed`、`reconciled` 之一 |
-| `docid` | 只有服务端成功才是 32 位十六进制，否则 null |
-| `title` | 字符串或 null |
-| `project` | `{"id","name"}` 或 null。成功行用 `normalized_metadata` |
-| `type` | 同上 |
-| `generated_at` | UTC 字符串或 null |
-| `generated_model` | `{"id","name"}` 或 null |
-| `pending_reasons` | 字符串数组。字段为 null 时说明原因。可为空数组 |
-| `permission` | `{"visibility","users","groups"}`。上传时快照。不含电话、不含 Key。不是线上 ACL 的当前权威 |
-| `backup_filename` | 相对 `~/docs`。成功是 `<docid>.html`，未成功是 `.pending/<client_upload_id>.html` |
-| `uploaded_at` | 服务端时间，否则 null |
-| `attempted_at` | 客户端 UTC 微秒时间 |
-| `sha256` | 原字节哈希，或尚未读到文件时 null |
-| `idempotency_key` | 幂等键。这不是 API Key |
-| `request_hash` | §7.2 |
-| `error_code` | 如 `401`、`409:idempotency_conflict`、`422:html_rejected`，否则 null |
-
-成功行的标签与时间用服务端 `normalized_metadata`。不要把 Key、验证码、HTML 正文、Base64 写进 manifest。
-
-磁盘满导致追加失败：保留已有文件和 `.meta.json`，退出码 4 或 5（若还没 POST 则为 5）。告警写明「日志没写上」。不要声称失败事件已入账。磁盘恢复后由人再运行一次恢复命令（§8.5），追加 `reconciled`，而不是把旧行改掉。
-
-### 8.5 remote_unknown 与恢复
-
-记 `remote_unknown` 的情况：超时、连接在请求送出后断开、3xx 且正文已送出、503 在有界重试之后仍无确定拒绝、409 `upload_in_progress` 在有界等待后仍在处理、成功响应缺 docid 或哈希不符。
-
-恢复：用 `.request.json` 的原始字节和同一个 Idempotency-Key 再 POST。
-
-- 200 且 `replayed: true`：拿到原 docid，走 §8.3，再追加 `reconciled`（或 `uploaded`，若这是第一次写成功行）。
-- 201：同样按成功收尾。只应发生在上次其实没领取成功时。
-- 409 `upload_in_progress`：继续按 §9 等，仍用原键。
-- 409 `idempotency_conflict`：停止。不新键。退出码 4。
-- 401/403：停止。上一回是否成功仍未知。先按 §3 处理 Key，再用原键恢复。不换键。
-
-远程成功、本地改名或追加失败：报告必须出现「远程已成功、本地待修复」，列出 docid、url、pending 路径、manifest 最后状态。不 POST 新文档。人修好磁盘后再运行，技能只做 §8.3 的本地收尾并追加 `reconciled`。
-
-### 8.6 验收锚点
-
-见 A8。测试在临时 `HOME` 里做：预备份哈希不符则不连接假服务器；目标文件哈希冲突时不覆盖；JSONL 可逐行 `json.loads`；状态闭集之外的字符串不会被写出。
-
-## JSONL 两行示例（合成值）
-
-```jsonl
-{"schema_version": 1, "event_id": "00000000000000000000000000000000", "client_upload_id": "11111111111111111111111111111111", "attempt": 1, "status": "prepared", "docid": null, "title": "示例", "project": null, "type": null, "generated_at": null, "generated_model": null, "pending_reasons": ["等待上传结果"], "permission": {"visibility": "private", "users": [], "groups": []}, "backup_filename": ".pending/11111111111111111111111111111111.html", "uploaded_at": null, "attempted_at": "2026-10-20T01:02:03.000000Z", "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "idempotency_key": "33333333333333333333333333333333", "request_hash": "4444444444444444444444444444444444444444444444444444444444444444", "error_code": null}
-{"schema_version": 1, "event_id": "55555555555555555555555555555555", "client_upload_id": "11111111111111111111111111111111", "attempt": 1, "status": "uploaded", "docid": "66666666666666666666666666666666", "title": "示例", "project": {"id": "project_demo", "name": "示例项目"}, "type": {"id": "type_demo", "name": "示例类型"}, "generated_at": "2026-10-20T00:00:00Z", "generated_model": {"id": "model_demo", "name": "示例模型"}, "pending_reasons": [], "permission": {"visibility": "private", "users": [], "groups": []}, "backup_filename": "66666666666666666666666666666666.html", "uploaded_at": "2026-10-20T01:02:04.000000Z", "attempted_at": "2026-10-20T01:02:03.000000Z", "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "idempotency_key": "33333333333333333333333333333333", "request_hash": "4444444444444444444444444444444444444444444444444444444444444444", "error_code": null}
+```text
+~/docs/v2/                         # 本人所有，0700，拒绝符号链接
+  manifest.jsonl                  # 0600，只追加事件，不存正文
+  .manifest.lock                  # 0600，保护事件追加与读取
+  .archive-locks/                  # 0700，跨进程恢复与清理协调
+    <client_upload_id>.lock        # 0600，稳定的空锁文件，不保存请求内容
+  .pending/                       # 0700
+    <client_upload_id>.request.json # 0600，原始请求字节（含正文编码）
+    <client_upload_id>.meta.json    # 0600，恢复元数据与幂等键
 ```
 
-恢复入口：`python3 bin/upload.py 源.html --resume CLIENT_UPLOAD_ID`。客户端从 0600 meta 和 request 读取原正文与原幂等键；远程结果已可信则仅做本地收尾，不 POST。不要手工更换键。
+追加前若发现最后一行没有换行，会在同一把 manifest 锁内先补一个换行，再追加新事件，并在标准错误输出一条固定警告；警告不包含损坏行内容。读取时持有同一把锁，跳过无法解析、非对象或缺少事件标识的行，保留其他完整事件；历史文件不存在时返回空清单，不创建目录或锁文件。不会截断、重写或输出损坏行。多进程追加共享同一把排他锁，保护尾行检查、补换行和完整事件追加。首次创建私有目录遇到并发创建者时，重新核对目录的类型、本人属主和 0700 权限；不接受不安全的竞争结果。
+
+本地预备份任一步失败时，清理本次已创建的请求和元数据文件，包括写入、flush、fsync 失败留下的部分文件；返回退出码 5，不发送写请求。随机 ID 冲突时，不覆盖或删除之前已存在的档案。清理本身失败不会覆盖原错误或泄露文件内容，可能有残留，需核对本地文件。
+
+不修改 `~/docs/` 下其他旧记录。Key 不得出现在 manifest、pending、上传内容或其他输出里；含当前 Key 的内容会停止处理，先移除敏感内容再试。
+
+## manifest 字段
+
+每行是独立 JSON 事件，同一 client_upload_id 可能有多行；不是一行对应一篇文档。
+
+| 字段 | 含义 |
+| --- | --- |
+| schema_version | 固定 2 |
+| event_id | 本次事件随机 ID |
+| client_upload_id | 本次上传/替换的客户端 ID，32 位小写十六进制，供 resume 使用 |
+| op | upload 或 replace |
+| status | 下述六种状态之一 |
+| doc_id | 文档 ID，1–128 位 ASCII 字母、数字、下划线或连字符；新上传准备阶段为 null |
+| url | 确定成功的文档链接，否则 null |
+| title | 文档标题；替换准备阶段是占位描述「替换文档」 |
+| sha256 | HTML 原始字节的 SHA-256 |
+| at | 事件 UTC 时间，RFC 3339 |
+| error | 明确拒绝的错误码，或正文版本已变化时的 superseded；其余通常为 null |
+
+## 六种状态
+
+| 状态 | 含义 |
+| --- | --- |
+| prepared | 已完成本地预备份，准备发送 |
+| uploaded | 上传已确认成功 |
+| replaced | 替换已确认成功 |
+| remote_unknown | 写入结果未知，需恢复或核对 |
+| failed | 远端明确拒绝，或补发替换时发现正文版本已变化（error=superseded），不再发送 |
+| abandoned | 未定结果的档案已满 24 小时而作废，不推断远端成功或失败；不再补发并删除 pending |
+
+准备档案元数据包括 client_upload_id、op、doc_id、idempotency_key、sha256、title、prepared_at（Unix 时间秒）、origin（准备请求时的目标站点）、content_updated_at（替换在准备之前查询的正文版本；上传为 null）。request.json 保存完整原请求字节，不得手工编辑或重新序列化。
+
+可信 HTTP 成功结果与补发前清单命中均先将 `success: {id, url, title}` 原子写入原 meta（同目录 0600 临时文件、fsync、replace、目录 fsync），再追加 uploaded/replaced 事件。只持久化这三个结果字段，不把完整服务端响应或 Key 存入 meta。写入成功元数据或 manifest 失败时退出 4；data 保留已知文档结果和 client_upload_id、resume_command，report 给出 ID，并写「文档已经上传成功：<url>；本地记录没写进去，用 resume 补记」。远端成功已确定，不再追加误导的 remote_unknown 事件。成功元数据本身未落盘时保留原档案，下一次 resume 仍需按正常恢复规则查询核对。
+
+## 档案删除与 resume
+
+成功或从未出现未知尝试的远端明确拒绝后，先追加确定事件，再删除两份 pending 档案；无长期正文副本。未满 24 小时的结果未知或远端成功但本地记录失败时保留档案用于恢复。若清理文件失败可能残留档案；残留不表示远端失败，也不要据此重复上传。manifest 只追加，不随成功删除。
+
+使用输出中的 `python3 bin/docsctl.py resume CLIENT_UPLOAD_ID`。恢复先通过上述安全读取器找该 ID 最后一条 uploaded/replaced/failed/abandoned 事件，跳过其后的 prepared/remote_unknown：成功事件核对当前 Key、合法文档 ID 与当前站点精确链接后离线退出 0，给出 `{id, url, title}` 和链接；失败或已作废事件离线退出 2，给出 `{client_upload_id}`，不再提供补发命令。读取失败或无效成功记录要求核对本地记录，不把任意 ID 当作路径，不输出不可信链接或 Key；成功链接不属于当前站点时退出 2，提示回原环境。没有已定结果时才加载 pending 并先核对档案记录的 origin 与当前站点。站点不一致、缺失或为空时，退出 2，提示「请在原来的环境里补发」，不联网并保留档案；不要手工补填或修改 origin。恢复会先检查私有元数据、当前 Key 与 success 的 ID/链接/标题。meta 已有可信 success 时，不受补发期限影响，只在本地追加 uploaded/replaced 并清理档案；不联网，不查账户、清单、正文版本，不重发，请求文件已经缺失也可完成。离线成功 data 仅含 id、url、title，report 给出链接与补记说明，不推断分享或到期状态。否则恢复会检查完整请求档案；上传补发先查询清单（q 为标题，uploaded_from 为 prepared_at 往前 48 小时的 UTC 时间），沿用 list --all 的分页校验和 1000 页上限，必须读完全部页。标题完全相同且 size_bytes 等于解码后 HTML 正文字节数时，当作已经上传，记 uploaded、删除两份档案、退出 0，报告「链接：<url>」与「补发前在清单里找到了同一篇，没有重复发送」，不发送 POST；data 为清单元数据，不含分享报告，不推断当前分享范围。未过期时，查询失败、分页异常或到达页数上限仍未完整读取，记 remote_unknown、退出 4，保留档案、client_upload_id 和 resume_command，不得继续发送；已过期则按下述 abandoned 规则处理，仍不发送。查无匹配才在原期限内重发完全相同的字节和原幂等键。档案缺失或被改动退出 4，停止并核对，不从源文件重建档案。
+
+替换在准备档案前先读取文档元数据，保存当时的 content_updated_at。补发替换前再次读取；与档案不一致时，记 failed、error=superseded，删除两份档案，退出 2，不发送替换请求。报告为：
+
+> 这篇文档在准备这次替换之后被改动过（可能正是这次替换已经生效，也可能是之后的另一次替换）。为避免覆盖较新的内容，不再补发；请用 get 查看当前状态，需要时重新执行 replace
+
+档案未记录有效的准备时正文版本时，无法安全判断，退出 2 并保留档案；不要手工补填当前版本。准备时无法取得有效版本则不建档、不发送；未过期的补发无法取得可信当前版本时，不发送，记 remote_unknown、退出 4，并保留档案、client_upload_id 和 resume_command。补发前账户查询（包括契约版本检查）失败也按此处理；查询期间过期则作废清档，不再提供 resume 命令。
+
+同一请求若有网络中断、暂时性 5xx 或不可信响应，后续明确错误仍按 remote_unknown 保留档案，不能当作请求从未生效。有效 pending 补发沿用先前的不确定性，即使本轮首次写请求被明确拒绝也退出 4；需人工 list/get 核对；到期后按报告处理。后续取得可信成功响应才记确定成功并清档。
+
+从 prepared_at 起满 24 小时，未确定结果的档案作废，不再自动重发。当前请求为 upload resume 时，仍先完成上述 U5 只读清单查找，命中则按成功处理；未命中、查询失败或不完整时都退出 4，记 abandoned 并删除两份 pending。已过期的 replace 不再查询版本或发送正文，直接作废。账户、版本检查、清单查找、网络传输或重试等待期间到期时同样停止后续发送并作废；最后一次响应已可信确认成功则仍记成功。过期输出的 data 仅含 client_upload_id，不含 resume_command，report 固定为：
+
+> 超过 24 小时，服务端已不记得这次请求，不会重发；请用 list 核对，确认没有成功的话，重新执行 upload/replace
+
+abandoned 仅表示停止本地恢复，不判断远端是否已经生效。作废事件写入或清理失败时，仍不提供恢复命令，报告额外提示核对本地档案；未能安全完成的文件可能残留。
+
+每次普通命令通过凭据、参数与站点检查后，在业务网络请求前顺带清理其他过期档案；清理本身不联网。当前 resume 的档案先排除，留给站点、Key 核对及只读查找/离线补记处理。只扫描固定 32 位十六进制 ID 的私有档案，校验目录、文件权限/属主、正文哈希和 Key（含解码正文与序列化元数据）；不处理任意路径、符号链接、不安全或损坏档案，也不回显其内容。过期 meta 已有可信 success 时，原站点下先离线补记 uploaded/replaced 并清档，不记 abandoned；站点、Key 或文件校验不通过则保留，不作猜测。
+
+服务端幂等记录只有 24 小时，再发可能另建一篇或再次替换。先 list/get 核对实际结果，再按用户意图重新 upload/replace；其他维护命令结果未知时用 get 核对。
+
+resume 在读取该 ID 的历史或 pending 前取得其档案锁，持续到成功记录/清理、作废或未知结果处理结束，异常路径也释放。启动清理在读取任何档案快照前非阻塞取得同一把锁，忙碌则跳过；一直持锁到决定、事件追加及删除结束，避免旧快照在 uploaded/replaced 之后追加 abandoned。锁顺序为档案锁、再 manifest 锁；不持 manifest 锁等待档案锁。`.archive-locks` 中的空文件保持稳定，不随 meta 原子替换或档案删除而换 inode，也不自动删除，防止并发进程锁住不同文件；其内容始终为空，不保留正文或凭据。无法安全取得私有锁时，resume 停止并退出 4，不联网、不改档案、不提供恢复命令；清理跳过该档案。
