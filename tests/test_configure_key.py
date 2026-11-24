@@ -125,8 +125,11 @@ class ConfigureKeyTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == 'nt', 'native PowerShell credential wrapper test')
     def test_powershell_wrapper_sends_secure_input_through_stdin(self):
+        # Windows PowerShell 5.1 must discover its own system modules when
+        # unittest is started from pwsh 7 (including GitHub-hosted runners).
+        shell_env = {key: value for key, value in self.env.items() if key.upper() != 'PSMODULEPATH'}
         policy = subprocess.check_output(['powershell.exe', '-NoProfile', '-NonInteractive',
-                                          '-Command', 'Get-ExecutionPolicy'], timeout=15)
+                                          '-Command', 'Get-ExecutionPolicy'], env=shell_env, timeout=15)
         if policy.strip().lower() in (b'restricted', b'allsigned'):
             self.skipTest('Effective PowerShell policy disallows the unsigned wrapper')
         # Stand in for the interactive prompt so CI can supply a fake key.
@@ -144,7 +147,7 @@ class ConfigureKeyTests(unittest.TestCase):
         command = ['powershell.exe', '-NoProfile', '-NonInteractive',
                    '-EncodedCommand', encoded]
         self.assertNotIn(NEW_KEY, ' '.join(command))
-        env = dict(self.env, TEST_KEY_WRAPPER=str(BIN / 'configure-key.ps1'),
+        env = dict(shell_env, TEST_KEY_WRAPPER=str(BIN / 'configure-key.ps1'),
                    TEST_KEY_PYTHON=sys.executable)
         result = subprocess.run(command, env=env, cwd=self.home, input=NEW_KEY.encode() + b'\n',
                                 capture_output=True, timeout=20)
