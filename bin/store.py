@@ -33,7 +33,7 @@ def discard_created(paths):
     """Best-effort rollback of files this operation successfully created."""
     for path in reversed(paths):
         try:
-            path.unlink(missing_ok=True)
+            fs.remove(path, missing_ok=True)
         except OSError:
             pass
     for parent in {path.parent for path in paths}:
@@ -55,7 +55,7 @@ def replace_json(path, value):
         sync_dir(path.parent)
     finally:
         if temporary.exists():
-            temporary.unlink()
+            fs.remove(temporary)
 
 
 def checked_fd(path, flags, *, create=True):
@@ -256,7 +256,7 @@ def check_pending_files(paths):
 def remove_pending(paths):
     check_pending_files(paths)
     for path in paths:
-        path.unlink(missing_ok=True)
+        fs.remove(path, missing_ok=True)
     sync_dir(paths[0].parent)
 
 
