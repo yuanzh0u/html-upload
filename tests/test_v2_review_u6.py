@@ -13,6 +13,8 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bin'))
 import docsctl
 import store
+from platform_support import (WINDOWS, assert_windows_private_directory,
+                              assert_windows_private_file, make_public)
 from v2_fake import FakeDocs
 
 
@@ -22,7 +24,7 @@ class KnownSuccessTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
         self.page = self.home / 'page.html'
-        self.page.write_text('<!doctype html><html><title>成功补记</title><p>正文</p></html>')
+        self.page.write_text('<!doctype html><html><title>成功补记</title><p>正文</p></html>', encoding='utf-8')
         self.fake = FakeDocs()
         self.now = time.time()
 
@@ -43,7 +45,7 @@ class KnownSuccessTests(unittest.TestCase):
         return root / (ident + '.meta.json'), root / (ident + '.request.json')
 
     def rows(self):
-        return [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text().splitlines()]
+        return [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text(encoding='utf-8').splitlines()]
 
     def fail_success_record(self, home, meta, status, now, **kwargs):
         if status in ('uploaded', 'replaced'):
@@ -118,12 +120,13 @@ class KnownSuccessTests(unittest.TestCase):
         self.assertFalse(self.paths(ident)[0].exists())
 
     def test_remember_failure_keeps_trusted_response_and_original_private_meta(self):
-        replace = store.os.replace
+        backend = store.fs if WINDOWS else store.os
+        replace = backend.replace
         def fail_meta(source, target):
             if str(target).endswith('.meta.json'):
                 raise OSError('persist ' + self.fake.key)
             return replace(source, target)
-        with patch('store.os.replace', side_effect=fail_meta):
+        with patch.object(backend, 'replace', side_effect=fail_meta):
             code, result = self.upload()
         self.assertEqual(code, 4)
         doc = next(iter(self.fake.docs.values()))
@@ -132,7 +135,10 @@ class KnownSuccessTests(unittest.TestCase):
         ident = result['data']['client_upload_id']
         meta_file, _ = self.paths(ident)
         self.assertNotIn('success', json.loads(meta_file.read_bytes()))
-        self.assertEqual(stat.S_IMODE(meta_file.stat().st_mode), 0o600)
+        if WINDOWS:
+            assert_windows_private_file(self, meta_file)
+        else:
+            self.assertEqual(stat.S_IMODE(meta_file.stat().st_mode), 0o600)
         self.assertEqual(len(list(meta_file.parent.iterdir())), 2)
         self.assertNotEqual(self.rows()[-1]['status'], 'remote_unknown')
         self.assertEqual(self.cli('resume', ident)[0], 0)
@@ -140,24 +146,36 @@ class KnownSuccessTests(unittest.TestCase):
 
     def test_success_meta_atomic_replace_is_private_and_contains_only_minimal_result(self):
         observations = []
-        replace = store.os.replace
+        backend = store.fs if WINDOWS else store.os
+        replace = backend.replace
         def inspect(source, target):
             if str(target).endswith('.meta.json'):
-                observations.append((stat.S_IMODE(Path(source).stat().st_mode),
-                                     json.loads(Path(source).read_bytes()), json.loads(Path(target).read_bytes())))
+                if WINDOWS:
+                    assert_windows_private_file(self, Path(source))
+                    mode = None
+                else:
+                    mode = stat.S_IMODE(Path(source).stat().st_mode)
+                observations.append((mode, json.loads(Path(source).read_bytes()), json.loads(Path(target).read_bytes())))
             return replace(source, target)
-        with patch('store.os.replace', side_effect=inspect):
+        with patch.object(backend, 'replace', side_effect=inspect):
             ident, success = self.local_failure(self.upload)
         self.assertEqual(len(observations), 1)
         mode, after, before = observations[0]
-        self.assertEqual(mode, 0o600)
+        if not WINDOWS:
+            self.assertEqual(mode, 0o600)
         self.assertNotIn('success', before)
         self.assertEqual(after['success'], success)
         self.assertEqual(set(success), {'id', 'url', 'title'})
         for path in self.paths(ident):
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            if WINDOWS:
+                assert_windows_private_file(self, path)
+            else:
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             self.assertNotIn(self.fake.key.encode(), path.read_bytes())
-        self.assertEqual(stat.S_IMODE(self.paths(ident)[0].parent.stat().st_mode), 0o700)
+        if WINDOWS:
+            assert_windows_private_directory(self.paths(ident)[0].parent)
+        else:
+            self.assertEqual(stat.S_IMODE(self.paths(ident)[0].parent.stat().st_mode), 0o700)
 
     def test_known_success_repair_rejects_cross_origin_without_network_or_mutation(self):
         ident, _ = self.local_failure(self.upload)
@@ -212,7 +230,7 @@ class KnownSuccessTests(unittest.TestCase):
                 self.assertEqual((self.home / 'docs/v2/manifest.jsonl').read_bytes(), before)
         ident, _ = self.local_failure(self.upload)
         meta_file, _ = self.paths(ident)
-        meta_file.chmod(0o644)
+        make_public(meta_file, 0o644)
         self.assertEqual(self.offline(ident)[0], 4)
         self.assertTrue(meta_file.exists())
 

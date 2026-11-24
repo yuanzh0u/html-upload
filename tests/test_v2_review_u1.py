@@ -21,7 +21,7 @@ class OriginArchiveTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
         self.page = self.home / 'review.html'
-        self.page.write_text('<!doctype html><html><title>站点隔离</title><p>x</p></html>')
+        self.page.write_text('<!doctype html><html><title>站点隔离</title><p>x</p></html>', encoding='utf-8')
         self.left, self.right = LoopbackDocs(self), LoopbackDocs(self)
 
     def cli(self, site, *argv):
@@ -90,7 +90,7 @@ class OriginArchiveTests(unittest.TestCase):
                     meta.pop('origin', None)
                 else:
                     meta['origin'] = value
-                meta_file.write_text(json.dumps(meta))
+                meta_file.write_text(json.dumps(meta), encoding='utf-8')
                 before = [file.read_bytes() for file in (meta_file, request_file)]
                 count = len(self.left.fake.calls)
                 code, result = self.cli(self.left, 'resume', ident)
@@ -104,7 +104,7 @@ class OriginArchiveTests(unittest.TestCase):
         meta_file, _ = self.archive_files(ident)
         meta = json.loads(meta_file.read_bytes())
         meta['origin'] = 'http://127.0.0.1/' + self.left.fake.key
-        meta_file.write_text(json.dumps(meta))
+        meta_file.write_text(json.dumps(meta), encoding='utf-8')
         count = len(self.left.fake.calls)
         code, result = self.cli(self.left, 'resume', ident)
         self.assertEqual(code, 2)

@@ -7,9 +7,10 @@ from pathlib import Path
 
 class IsolationTests(unittest.TestCase):
     def check_child(self, script):
-        result = subprocess.run([sys.executable, '-c', script],
-                                cwd=Path(__file__).resolve().parent,
-                                text=True, capture_output=True)
+        tests = Path(__file__).resolve().parent
+        script = 'import sys\nsys.path.insert(0, sys.argv[1])\n' + script
+        result = subprocess.run([sys.executable, '-c', script, str(tests)], cwd=tests,
+                                capture_output=True, encoding='utf-8')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_import_preserves_existing_bytecode_guard(self):

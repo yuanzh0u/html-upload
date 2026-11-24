@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bin'))
 import docsctl
 import store
+from platform_support import write_credential
 from v2_fake import FakeDocs
 
 
@@ -19,7 +20,7 @@ class FinalReviewTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.home = Path(temp.name)
         self.page = self.home / 'page.html'
-        self.page.write_text('<html><title>测试</title></html>')
+        self.page.write_text('<html><title>测试</title></html>', encoding='utf-8')
         self.fake = FakeDocs()
         self.now = 1800000000.0
         self.output = ''
@@ -251,11 +252,7 @@ class FinalReviewTests(unittest.TestCase):
         if source == 'env':
             env['DOCS_API_KEY'] = token
         else:
-            folder = self.home / '.config/docs'
-            folder.mkdir(parents=True, mode=0o700)
-            credential = folder / 'api-key'
-            credential.write_text(token)
-            credential.chmod(0o600)
+            write_credential(self.home / '.config/docs/api-key', token)
         output = io.StringIO()
         code = docsctl.run(argv, env=env, out=output, transport=self.fake.transport)
         text = output.getvalue()

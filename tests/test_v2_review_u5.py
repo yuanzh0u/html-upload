@@ -70,7 +70,7 @@ class ResumeLookupTests(unittest.TestCase):
         self.assertNotIn('目前只有你自己能看', result['report'])
         self.assertNotIn('share_report', result['data'])
         self.assertEqual(list((self.home / 'docs/v2/.pending').iterdir()), [])
-        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text().splitlines()]
+        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text(encoding='utf-8').splitlines()]
         self.assertEqual((rows[-1]['status'], rows[-1]['doc_id'], rows[-1]['url']),
                          ('uploaded', doc['id'], doc['url']))
 
@@ -80,7 +80,7 @@ class ResumeLookupTests(unittest.TestCase):
         self.assertIn('resume ' + self.meta['client_upload_id'], result['data']['resume_command'])
         self.assertEqual(store.load_pending(self.home, self.meta['client_upload_id']), (self.meta, self.raw))
         self.assertEqual(self.posts(), [])
-        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text().splitlines()]
+        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text(encoding='utf-8').splitlines()]
         self.assertEqual(rows[-1]['status'], 'remote_unknown')
 
     def pages(self, pages):

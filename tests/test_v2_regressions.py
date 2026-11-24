@@ -41,7 +41,7 @@ class UploadOutcomeRegressionTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.home = Path(temp.name)
         self.page = self.home / 'page.html'
-        self.page.write_text('<html><title>测试</title></html>')
+        self.page.write_text('<html><title>测试</title></html>', encoding='utf-8')
         self.fake = FakeDocs()
 
     def cli(self, *argv, transport=None):
@@ -138,7 +138,7 @@ class ResumeIdRegressionTests(unittest.TestCase):
             doc.update(id='Ab_9-x', url=fake.origin + '/d/Ab_9-x')
             fake.docs[doc['id']] = doc
             page = Path(home) / 'page.html'
-            page.write_text('<html><title>测试</title></html>')
+            page.write_text('<html><title>测试</title></html>', encoding='utf-8')
             def cli(argv):
                 out = io.StringIO()
                 code = docsctl.run(argv, env={'HOME': home, 'DOCS_API_KEY': fake.key,

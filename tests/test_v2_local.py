@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bin'))
 import local
 from local import Stop
+from platform_support import make_public, write_credential
 
 HTML = ('<!doctype html><html><head><meta charset="utf-8"><title>周报</title></head>'
         '<body>x</body></html>').encode()
@@ -24,10 +25,12 @@ class LocalTests(unittest.TestCase):
 
     def key_file(self, text, file_mode=0o600, dir_mode=0o700):
         folder = self.home / '.config/docs'
-        folder.mkdir(parents=True)
-        (folder / 'api-key').write_text(text)
-        (folder / 'api-key').chmod(file_mode)
-        folder.chmod(dir_mode)
+        key = folder / 'api-key'
+        write_credential(key, text)
+        if file_mode != 0o600:
+            make_public(key, file_mode)
+        if dir_mode != 0o700:
+            make_public(folder, dir_mode)
 
     def test_origin_rules(self):
         self.assertEqual(local.origin_from({}), 'https://docs.zh0uyuan.com')

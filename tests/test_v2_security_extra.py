@@ -29,8 +29,8 @@ class SecurityExitTests(unittest.TestCase):
 
     def test_raw_file_inputs_precede_validation(self):
         summary = self.home / 'summary.txt'
-        summary.write_text(self.fake.key + 'x'*2000)
-        self.page.write_text(planned.HTML.format(self.fake.key))
+        summary.write_text(self.fake.key + 'x'*2000, encoding='utf-8')
+        self.page.write_text(planned.HTML.format(self.fake.key), encoding='utf-8')
         for argv in [('upload', str(self.page), '--summary', ''),
                      ('edit', 'bad', '--summary-file', str(summary))]:
             self.assertIn('API Key', self.cli(*argv)[1]['report'])
@@ -51,10 +51,10 @@ class SecurityExitTests(unittest.TestCase):
             return status, data, headers
         self.fake.transport = echo
         self.assertEqual(self.cli('upload', str(self.page), '--summary', 's')[0], 0)
-        self.assertNotIn(self.fake.key, (self.home / 'docs/v2/manifest.jsonl').read_text())
+        self.assertNotIn(self.fake.key, (self.home / 'docs/v2/manifest.jsonl').read_text(encoding='utf-8'))
         self.fake.fail_next = [(400, self.fake.key)]
         self.assertEqual(self.cli('upload', str(self.page), '--summary', 'different')[0], 2)
-        self.assertNotIn(self.fake.key, (self.home / 'docs/v2/manifest.jsonl').read_text())
+        self.assertNotIn(self.fake.key, (self.home / 'docs/v2/manifest.jsonl').read_text(encoding='utf-8'))
 
     def test_escaped_credentials_removed_before_json(self):
         self.fake.key = 'Sk."\\' + 'q'*30
@@ -91,7 +91,7 @@ class SecurityExitTests(unittest.TestCase):
 
     def test_html_entity_derived_title_is_checked(self):
         encoded = ''.join('&#' + str(ord(c)) + ';' for c in self.fake.key)
-        self.page.write_text('<!doctype html><html><head><meta charset="utf-8"><title>' + encoded + '</title></head><body>x</body></html>')
+        self.page.write_text('<!doctype html><html><head><meta charset="utf-8"><title>' + encoded + '</title></head><body>x</body></html>', encoding='utf-8')
         code, result = self.cli('upload', str(self.page), '--summary', 's')
         self.assertEqual(code, 2)
         self.assertIn('API Key', result['report'])
