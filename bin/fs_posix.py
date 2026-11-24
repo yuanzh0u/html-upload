@@ -106,3 +106,7 @@ def unlock(fd):
 
 def replace(source, destination):
     os.replace(source, destination)
+
+
+def remove(path, *, missing_ok=False):
+    Path(path).unlink(missing_ok=missing_ok)

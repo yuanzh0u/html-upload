@@ -12,6 +12,9 @@ import secrets
 import sys
 import time
 
+# The official Windows embeddable interpreter does not add the script directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import client
 import fields
 import local
