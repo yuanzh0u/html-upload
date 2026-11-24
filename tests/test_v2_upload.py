@@ -65,6 +65,47 @@ class UploadTests(unittest.TestCase):
                          [('prepared', None), ('uploaded', doc['id'])])
         self.assertEqual(list((self.home / 'docs/v2/.pending').iterdir()), [])
 
+    def test_upload_report_lists_tags(self):                        # D65、重点关注 2、4
+        code, result = self.upload('--tag', '项目', '--tag', '周报')
+        self.assertEqual(code, 0)
+        self.assertIn('对方需登录且在分享范围内才能打开。\n标签：周报、项目\n', result['report'])
+        code, again = self.upload('--tag', '周报', '--tag', '项目')   # 24 小时内重放
+        self.assertEqual((code, again['data']['id']), (0, result['data']['id']))
+        self.assertIn('对方需登录且在分享范围内才能打开。\n标签：周报、项目\n24 小时内', again['report'])
+
+    def test_upload_without_tags_says_so(self):                     # D65
+        code, result = self.upload()
+        self.assertEqual(code, 0)
+        self.assertIn('对方需登录且在分享范围内才能打开。\n没有标签\n', result['report'])
+
+    def test_replace_and_resume_list_tags(self):                    # D65
+        self.fake.fail_next = ['lost'] + ['network'] * 5            # 服务端已处理，但响应丢失
+        client_id = self.upload('--tag', '周报')[1]['data']['client_upload_id']
+        code, result = self.cli('resume', client_id)
+        self.assertEqual(code, 0)
+        self.assertIn('对方需登录且在分享范围内才能打开。\n标签：周报\n以下分享报告来自首次请求', result['report'])
+        code, result = self.cli('replace', result['data']['id'], str(self.page), '--summary', '更新后的摘要。')
+        self.assertEqual(code, 0)
+        self.assertIn('对方需登录且在分享范围内才能打开。\n标签：周报\n链接不变', result['report'])
+
+    def test_malformed_tags_leave_success_alone(self):              # 重点关注 1
+        real = self.fake.transport
+        for broken in (None, '周报', ['周报', 1]):
+            with self.subTest(tags=broken):
+                def transport(method, url, token, body=None, idem=None):
+                    status, value, headers = real(method, url, token, body, idem)
+                    if method == 'POST' and isinstance(value, dict):
+                        if broken is None:
+                            del value['tags']
+                        else:
+                            value['tags'] = broken
+                    return status, value, headers
+                self.fake.transport = transport
+                code, result = self.upload('--tag', '周报', '--new')
+                self.assertEqual((code, result['status']), (0, 'success'))
+                self.assertNotIn('标签', result['report'])
+                self.assertEqual(self.manifest()[-1]['status'], 'uploaded')
+
     def test_local_rejections_send_no_request(self):                # C-FR-02、C-FR-03
         big = self.home / 'big.html'
         big.write_bytes(b'<html>' + b'a' * 2_097_200 + b'</html>')

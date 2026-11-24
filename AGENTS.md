@@ -1,12 +1,13 @@
 # AGENTS.md — html-upload
 
-本仓库是 docs 平台的 Agent 端技能，正在开发 V2。做法与服务端相同，推倒重来（D57）：V1 的代码保留在标签 `v1-final` 上，不再维护。
+本仓库是 docs 平台的 Agent 端技能。`main` 自 2026-11-21 起就是 V2（PR #4）；V1 的代码保留在标签 `v1-final` 上，不再维护。
 
-**线上技能目录，不要在这里切分支。** `~/.agents/skills/html-upload` 是指向 `html-upload/` 的软链接，各个 Agent 每天都在用其中的 V1。V2 一律在 worktree `../html-upload-v2/` 里开发，做法见实施计划的「开工准备」。等服务端 V2 上线当天，才合并并切换（D50）。
+**线上技能目录，不要在这里切分支。** `~/.agents/skills/html-upload` 是指向 `html-upload/` 的软链接，各个 Agent 每天都在用其中的 `main`。改动一律在单独的 worktree 里做，路径和分支见当前实施计划的「开工准备」；合并后在 `html-upload/` 里 `git pull`，线上技能才随之更新。
 
 | 用途 | 文件 |
 | --- | --- |
 | 实施计划与测试方案（逐任务执行） | `docs/V2-impl-plan.md` |
+| 实施计划二：没给标签时自选（D65） | `docs/V2-impl-plan-2.md` |
 | 技能端需求 | `docs/V2-requirements.md` |
 | 接口契约（v2.0，已冻结） | docs-service 的 `docs/api/v2/contract.md`。里程碑一合入前在 `feat/v2-m1` 分支上，要点已抄进实施计划 |
 | 服务端需求与决定记录（只用来理解背景） | docs-service 的 `docs/V2-requirements.md`、`docs/V2-requirements-v1.2-decisions.md` |
@@ -15,7 +16,7 @@
 
 ## 命令
 
-以下命令都在仓库根目录运行，开发期间即 `html-upload-v2/`。
+以下命令都在仓库根目录运行，即当前所在的 worktree。
 
 - **全量测试：** `python3.12 -m unittest discover -s tests`。只用 Python 3.12 标准库，不装任何第三方包。
 - **单个模块：** `cd tests && python3.12 -m unittest test_v2_upload -v`
@@ -25,13 +26,7 @@
 ## 分支与 PR（D58）
 
 - 不在 `main` 上提交，也不推送 `main`。本地的 pre-push 钩子会拒绝这类推送。
-- **开工：** 按实施计划「开工准备」建 worktree 和分支 `feat/v2`。第一个提交推送后，立即开一个草稿 PR：
-
-  ```bash
-  gh pr create --draft --base main --title "html-upload V2：对接契约 v2.0 的上传与文档维护" --body "<任务清单>"
-  ```
-
-  其中 `<任务清单>` 列出全部任务，每项一行，写成 `- [ ] U00 清场` 这样。
+- **开工：** 按当前实施计划的「开工准备」建 worktree 和分支。第一个提交推送后，立即开一个草稿 PR，正文列出计划里的全部任务，每项一行，写成 `- [ ] A1 …` 这样。
 - **每完成一个任务：**
   1. 做一个提交，标题沿用实施计划里给的提交信息；
   2. `git push`；
@@ -47,7 +42,7 @@
      - U09 联调的结果；
      - 新开的 Issue；
      - 采用了哪些默认做法。
-- **不合并任何 PR。** 审查通过后 PR 也保持打开，等服务端 V2 上线当天由人合并。
+- **不合并任何 PR。** 合并由负责人决定。
 
 ## 遇到问题：开 Issue
 

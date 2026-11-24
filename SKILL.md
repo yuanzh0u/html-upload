@@ -19,7 +19,7 @@ Key 的配置和平台边界见 [POSIX 凭据](references/credentials-posix.md)�
 
 ```bash
 python3 bin/docsctl.py me
-python3 bin/docsctl.py upload ./report.html --summary '用户提供的摘要' --tag '用户标签'
+python3 bin/docsctl.py upload ./report.html --summary '用户提供的摘要' --tag '周报'
 python3 bin/docsctl.py replace DOC_ID ./report.html --summary-file ./summary.txt --share-friend '张三'
 python3 bin/docsctl.py resume CLIENT_UPLOAD_ID
 python3 bin/docsctl.py list --all
@@ -41,7 +41,7 @@ python3 bin/docsctl.py tags
 
 ## 标签与分享规则
 
-只用用户给出的标签，不推断或自行分类。`--tag` 可重复；`edit --tag` 整体替换标签，`--clear-tags` 清空，不指定就不改。最多 20 个标签，每个 1–40 字，仅去首尾空白、按原样大小写去重。
+用户给了标签就原样使用，不增不减；用户说不要标签就不加。用户没给时，上传前先运行 `tags` 查看已用标签，按文档的用途和内容自选 1–3 个简短标签：优先沿用已有标签，确实没有合适的才新建；标签要能把这篇和其他文档区分开，不用「HTML」「网页」这类篇篇都适用的词。上传结果会列出所用标签，原样转述即可；用户要改，随时用 `edit --tag` 整组替换，或用 `--clear-tags` 清空。已有文档的标签只在用户要求时才改，替换正文不改标签。`--tag` 可重复；`edit --tag` 整体替换标签，`--clear-tags` 清空，不指定就不改。最多 20 个标签，每个 1–40 字，仅去首尾空白、按原样大小写去重。
 
 只向用户指定的对象分享；`--share-friend` 与 `--share-group` 可重复，各最多 50 个名称，去首尾空白后精确匹配。链接需登录且在分享范围内才能打开；首次新建成功且无分享对象时只有本人能看。替换未追加对象时已有分享保持不变。上传重放的分享报告来自首次请求，当前分享范围可能已变化，需到网页核对。分享部分失败仍可能上传成功，以 report 中逐项结果为准。
 
@@ -51,7 +51,7 @@ python3 bin/docsctl.py tags
 
 | 退出码 | 含义与 Agent 行动 |
 | --- | --- |
-| 0 | 成功；原样转述 report，包括链接、分享结果和到期说明。 |
+| 0 | 成功；原样转述 report，包括链接、标签、分享结果和到期说明。 |
 | 2 | 参数、文件、凭据、契约不兼容、远端明确拒绝、只读失败，或替换的正文版本已变化/原始版本缺失；按 report 修正，不声称已完成。 |
 | 3 | 删除预览，需要用户确认；未作修改，展示 report 并取得明确同意。 |
 | 4 | 写操作远端结果未知，或远端成功而本地记录失败；上传、替换用输出的 resume 命令恢复；未过期补发档案的账户/当前元数据查询失败也退出 4，保留档案和恢复命令；已过期则按下述作废规则清档，不提供 resume 命令。其他写操作用 get 核对，不盲目重做。 |
