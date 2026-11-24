@@ -136,8 +136,18 @@ def trusted(doc, origin, doc_id):
         return False
 
 
+def tags_line(doc) -> str | None:
+    tags = doc.get('tags')
+    if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+        return None
+    return '标签：' + '、'.join(tags) if tags else '没有标签'
+
+
 def success_report(doc, op, status, *, duplicate_hint=True):
     lines = ['链接：' + doc['url'], '对方需登录且在分享范围内才能打开。']
+    tag_report = tags_line(doc)
+    if tag_report is not None:
+        lines.append(tag_report)
     replay = op == 'upload' and status == 200
     if replay and duplicate_hint:
         lines.append('24 小时内提交过完全相同的内容和参数，返回的是同一篇；要另起一篇就加 --new。')
@@ -594,8 +604,12 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                         store.finalize(home, meta, clock(), doc=found, check=check_secret)
                         known_success = None
                         code, status, data = 0, 'success', found
-                        report = ('链接：' + found['url'] + '\n对方需登录且在分享范围内才能打开。'
-                                  '\n补发前在清单里找到了同一篇，没有重复发送')
+                        lines = ['链接：' + found['url'], '对方需登录且在分享范围内才能打开。']
+                        tag_report = tags_line(found)
+                        if tag_report is not None:
+                            lines.append(tag_report)
+                        lines.append('补发前在清单里找到了同一篇，没有重复发送')
+                        report = '\n'.join(lines)
                     else:
                         remote_status, value, headers = api.send_idempotent(
                             'POST' if op == 'upload' else 'PUT', path, raw, meta['idempotency_key'],

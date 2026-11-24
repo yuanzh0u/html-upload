@@ -105,6 +105,12 @@ class ResumeLookupTests(unittest.TestCase):
         self.assert_found(code, result, doc)
         self.assertEqual(len(self.fake.docs), 1)
 
+    def test_found_upload_report_lists_tags(self):                  # D65、重点关注 3
+        doc = self.candidate(tags=['周报', '项目'])
+        code, result = self.cli()
+        self.assert_found(code, result, doc)
+        self.assertIn('对方需登录且在分享范围内才能打开。\n标签：周报、项目\n' + NOTICE, result['report'])
+
     def test_lookup_uses_exact_title_and_prepared_time_minus_48_hours_in_utc(self):
         self.now += 3600
         code, result = self.cli()

@@ -20,7 +20,7 @@ JSON 外层为 `{ok, command, status, exit_code, data, report}`。正常状态�
 
 HTML 为本地非符号链接的普通 `.html` 文件，严格 UTF-8，1–2,097,152 字节；不接受 BOM、NUL、冲突 charset，需 HTML 起始和结束标记。工具只读源文件；标题优先使用显式 `--title`，其次为 `hx:title` meta，最后为唯一页面 `<title>`；忽略 SVG、MathML 内的 `<title>`。多个页面 `<title>`（即使文字相同或有 `hx:title`）必须显式提供 `--title`；无标题来源或选中的 meta 标题不合法时也需明确指定。标题先合并连续空白（含换行）为一个空格，再去首尾空白，结果须为 1–200 字；拒绝剩余 Cc、Cs，方向控制 U+202A–U+202E、U+2066–U+2069，以及 U+200B、U+2060、U+FEFF；允许其他 Cf（包括 ZWJ、ZWNJ、软连字符）。摘要纯文本 1–1000 字；摘要文件使用 UTF-8，先检查原始字节中的 Key，再将 CRLF 规整为 LF 后校验。标签、分享按技能入口规则。
 
-data：元数据加 `share_report: {shared: [{type, name}], failed: [{type, name, reason}]}`；失败原因 `not_friend` / `group_not_found`。工具从文件名和允许的页面元数据构造 source_info，不接收此参数。
+data：元数据加 `share_report: {shared: [{type, name}], failed: [{type, name, reason}]}`；失败原因 `not_friend` / `group_not_found`。成功的 report 在登录说明之后列出标签，写作「标签：a、b」，没有标签时为「没有标签」。工具从文件名和允许的页面元数据构造 source_info，不接收此参数。
 
 请求体中的标签、好友名和群名在既有去首尾空白、精确去重及校验后，按原样字符串排序；不做大小写折叠或 Unicode 归一化。仅交换这些参数的顺序会得到相同的请求字节和上传幂等键，`--new` 仍每次生成新的键。完全相同的请求在 24 小时内重放返回同一篇；不要把重放说成新建；重放的 share_report 是首次请求的历史结果，不能据此断言当前分享范围，需到网页核对。只有首次新建成功且分享报告为空时才说明只有本人能看。只有本次 upload 的第一次实际上传请求就返回 200 时，报告才提示重复内容与 `--new`；自动重试后或 resume 返回 200 时按上传成功报告，不建议另建，仍保留历史分享报告说明。用户确认另建才使用 `--new`；重放指向已删除文档会拒绝，仍需用户确认另建；若同时本地记录失败，report 保留删除/--new 说明及本地核对说明。退出 0、2、4、5；4 按 report 使用尚有效的 resume 命令或核对过期结果，5 表示未发上传请求。
 
@@ -28,11 +28,11 @@ data：元数据加 `share_report: {shared: [{type, name}], failed: [{type, name
 
 `python3 bin/docsctl.py replace DOC_ID HTML (--summary TEXT | --summary-file FILE) [--share-friend NAME ...] [--share-group NAME ...]`。
 
-文件、摘要、分享规则同 upload，好友名和群名同样在请求体中按原样字符串排序；不支持 `--title`、`--tag` 或 `--new`。data：元数据加 share_report。链接、标题、标签不变；到期时间重新起算，分享只追加，收藏仍不过期。分享报告为空表示本次未追加分享对象，已有分享保持不变，不能解释为只有本人能看。退出 0、2、4、5；未知结果用 resume，勿重复发起替换。准备档案前先查询元数据并保存 content_updated_at，供补发时复核正文版本。
+文件、摘要、分享规则同 upload，好友名和群名同样在请求体中按原样字符串排序；不支持 `--title`、`--tag` 或 `--new`。data：元数据加 share_report。链接、标题、标签不变；report 同样列出标签；到期时间重新起算，分享只追加，收藏仍不过期。分享报告为空表示本次未追加分享对象，已有分享保持不变，不能解释为只有本人能看。退出 0、2、4、5；未知结果用 resume，勿重复发起替换。准备档案前先查询元数据并保存 content_updated_at，供补发时复核正文版本。
 
 ## resume
 
-`python3 bin/docsctl.py resume CLIENT_UPLOAD_ID`。读取输出中的本地客户端上传 ID（32 位小写十六进制），不是 DOC_ID。data 成功时同原 upload/replace；上传补发前在清单命中时，data 为该篇清单元数据，不包含 share_report；已加载且未过期档案的未知结果为 `{client_upload_id, resume_command}`；过期作废时只有 `{client_upload_id}`。档案缺失、损坏或 ID 无效时无法加载恢复元数据，退出 4 的 data 为 `{error, http_status, request_id}`，不会提供 resume_command；按 report 停止并核对档案，不从源文件重建。退出 0、2、4。
+`python3 bin/docsctl.py resume CLIENT_UPLOAD_ID`。读取输出中的本地客户端上传 ID（32 位小写十六进制），不是 DOC_ID。data 成功时同原 upload/replace；上传补发前在清单命中时，data 为该篇清单元数据，不包含 share_report；补发成功和清单命中时，report 同样列出标签，只做离线补记时没有标签信息，不列这一行；已加载且未过期档案的未知结果为 `{client_upload_id, resume_command}`；过期作废时只有 `{client_upload_id}`。档案缺失、损坏或 ID 无效时无法加载恢复元数据，退出 4 的 data 为 `{error, http_status, request_id}`，不会提供 resume_command；按 report 停止并核对档案，不从源文件重建。退出 0、2、4。
 
 先通过安全 manifest 读取器查该客户端 ID 的最后一条已定结果，跳过损坏行；即使其后有 prepared/remote_unknown 也不改变已定结果。不联网、不重写历史：uploaded/replaced 核对当前 Key、合法文档 ID 与当前站点的精确链接后退出 0，data 为 `{id, url, title}`，report 给出链接；failed/abandoned 退出 2，data 为 `{client_upload_id}`，不提供 resume_command；abandoned 仍说明超过 24 小时且不会重发。成功记录站点不符时退出 2，提示回原环境；不安全历史或无效成功记录退出 4 并要求核对。没有已定结果才加载 pending，保留以下站点与恢复校验。
 
@@ -70,4 +70,4 @@ meta 已有可信 `success: {id, url, title}` 时，核对私有元数据、Key 
 
 ## tags
 
-`python3 bin/docsctl.py tags`，无参数。data：`{items: [{tag, count}]}`。用于查看已用标签，不表示可自动替用户选标签。退出 0、2。
+`python3 bin/docsctl.py tags`，无参数。data：`{items: [{tag, count}]}`。上传前用它查看已用标签；用户没给标签时，按技能入口的规则优先沿用其中的标签。退出 0、2。

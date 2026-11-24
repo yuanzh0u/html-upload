@@ -9,7 +9,9 @@ import docsctl
 import local
 
 PHRASES = ('docs-api v2', '主版本', '目标 100–300 字', '硬上限 1000 字', '用户给了摘要就用用户的',
-           '不要照抄页面开头的导航、标题、目录或样板文字', '不要写入 Key、手机号等敏感信息', '只用用户给出的标签',
+           '不要照抄页面开头的导航、标题、目录或样板文字', '不要写入 Key、手机号等敏感信息',
+           '用户给了标签就原样使用', '用户说不要标签就不加', '先运行 `tags` 查看已用标签', '自选 1–3 个简短标签',
+           '优先沿用已有标签', '已有文档的标签只在用户要求时才改',
            '把 report 原样转述给用户', '不要把部分成功说成全部成功', '用 replace，不要另传一篇',
            '先不带 --yes 预览', '得到用户明确同意后才加 --yes', '只有用户确认要另起一篇时才加 --new',
            '不要绕过本工具直接请求接口')
@@ -31,6 +33,15 @@ class DocTests(unittest.TestCase):
         for phrase in PHRASES:
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.skill)
+
+    def test_old_tag_rule_is_gone(self):                            # D65、重点关注 5
+        requirements = read(ROOT / 'docs' / 'V2-requirements.md')
+        for text, old in ((self.skill, '只用用户给出的标签'), (self.refs['commands.md'], '不表示可自动替用户选标签'),
+                          (requirements, '技能不得自行编造标签')):
+            with self.subTest(old=old):
+                self.assertNotIn(old, text)
+        self.assertIn('上传前用它查看已用标签', self.refs['commands.md'])
+        self.assertIn('自选 1–3 个', requirements)
 
     def test_every_subcommand_documented(self):
         parser = docsctl.build_parser()
