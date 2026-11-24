@@ -49,7 +49,7 @@ class UploadTests(unittest.TestCase):
         return [c for c in self.fake.calls if c['method'] in ('POST', 'PUT')]
 
     def manifest(self):
-        lines = (self.home / 'docs/v2/manifest.jsonl').read_text().splitlines()
+        lines = (self.home / 'docs/v2/manifest.jsonl').read_text(encoding='utf-8').splitlines()
         return [json.loads(line) for line in lines]
 
     def test_upload_success_reports_url_and_login_note(self):       # C-FR-03

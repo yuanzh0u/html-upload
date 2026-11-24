@@ -12,6 +12,9 @@ import secrets
 import sys
 import time
 
+# The official Windows embeddable interpreter does not add the script directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import client
 import fields
 import local
@@ -21,6 +24,24 @@ import store
 KEY_CONTENT = local.KEY_CONTENT
 EXPIRED_REPORT = ('超过 24 小时，服务端已不记得这次请求，不会重发；请用 list 核对，'
                   '确认没有成功的话，重新执行 upload/replace')
+
+
+def suggested_command(action, ident, *options, token):
+    if os.name != 'nt':
+        return ' '.join(('python3 bin/docsctl.py', action, ident, *options))
+
+    def quote_path(path):
+        # PowerShell recognizes typographic single quotes as delimiters, too.
+        quotes = "'\u2018\u2019\u201a\u201b"
+        return "'" + ''.join(char * 2 if char in quotes else char for char in path) + "'"
+
+    paths = (sys.executable, str(Path(__file__).resolve()))
+    # Screen raw paths before PowerShell escaping can split a key.
+    if contains_key(paths, token):
+        return '[已隐藏]'
+    prefix = ('&', *map(quote_path, paths), action)
+    arguments = (*options, '--', ident) if ident.startswith('-') else (ident, *options)
+    return ' '.join((*prefix, *arguments))
 
 
 def contains_key(value, token):
@@ -342,7 +363,8 @@ def manage(api, args, body, origin):
         if not metadata_valid(data, origin, ident):
             raise local.Stop('服务端元数据格式无效')
         if command == 'delete':
-            return 3, 'confirm_required', data, f'将永久删除《{data["title"]}》（{data["url"]}）。删除后所有人立即无法打开，不能恢复。请先向用户确认；用户同意后执行：python3 bin/docsctl.py delete {ident} --yes'
+            confirm = suggested_command('delete', ident, '--yes', token=api.token)
+            return 3, 'confirm_required', data, f'将永久删除《{data["title"]}》（{data["url"]}）。删除后所有人立即无法打开，不能恢复。请先向用户确认；用户同意后执行：{confirm}'
         report = f'标题：{data["title"]}\n链接：{data["url"]}\n摘要：{data["summary"]}\n标签：' + '、'.join(data['tags']) + '\n上传时间：' + display_time(data['uploaded_at'])
         report += '\n收藏中，不会过期' if data['favorite'] else '\n到期时间：' + display_time(data['expires_at'])
         return 0, 'success', data, report
@@ -373,7 +395,8 @@ def manage(api, args, body, origin):
                 report += '\n标签已整体替换为：' + '、'.join(body['tags']) if body['tags'] else '\n标签已清空'
         return 0, 'success', data, report
     except client.RemoteUnknown:
-        raise local.Stop(f'结果未知，请用 python3 bin/docsctl.py get {ident} 核对', code=4) from None
+        verify = suggested_command('get', ident, token=api.token)
+        raise local.Stop(f'结果未知，请用 {verify} 核对', code=4) from None
 
 
 def terminal_resume(home, ident, origin, check):
@@ -401,15 +424,15 @@ def terminal_resume(home, ident, origin, check):
     return None
 
 
-def local_record_failure(meta, doc):
-    resume = 'python3 bin/docsctl.py resume ' + meta['client_upload_id']
+def local_record_failure(meta, doc, token):
+    resume = suggested_command('resume', meta['client_upload_id'], token=token)
     data = dict(doc, client_upload_id=meta['client_upload_id'], resume_command=resume)
     report = ('文档已经上传成功：' + doc['url'] + '；本地记录没写进去，用 resume 补记'
               + '\n文档 ID：' + doc['id'] + '\n' + resume)
     return 4, 'remote_unknown', data, report
 
 
-def pending_failure(home, meta, now, check, report):
+def pending_failure(home, meta, now, check, report, token):
     if store.expired(meta, now):
         report = EXPIRED_REPORT
         try:
@@ -422,7 +445,7 @@ def pending_failure(home, meta, now, check, report):
         store.record(home, meta, 'remote_unknown', now, check=check)
     except Exception:
         pass
-    resume = 'python3 bin/docsctl.py resume ' + meta['client_upload_id']
+    resume = suggested_command('resume', meta['client_upload_id'], token=token)
     return (4, 'remote_unknown', dict(client_upload_id=meta['client_upload_id'], resume_command=resume),
             report + '\n' + resume)
 
@@ -463,7 +486,7 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
             raise local.Stop(KEY_CONTENT)
         args = parser.parse_args(argv)
         if getattr(args, 'summary_file', None) is not None:
-            summary_bytes = Path(args.summary_file).read_bytes()
+            summary_bytes = local.read_summary(args.summary_file)
             if contains_key(summary_bytes, token):
                 raise local.Stop(KEY_CONTENT)
             args.summary = summary_bytes.decode('utf-8').replace('\r\n', '\n')
@@ -639,26 +662,27 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
                     raise local.Stop('写操作结果未知', code=4) from None
     except (local.Stop, fields.FieldError, OSError, UnicodeError) as error:
         if known_success is not None:
-            code, status, data, report = local_record_failure(meta, known_success)
+            code, status, data, report = local_record_failure(meta, known_success, token)
         else:
             code = error.code if isinstance(error, local.Stop) else 2
             status = 'remote_unknown' if code == 4 else 'failed'
             report = error.message if isinstance(error, local.Stop) else ('本地文件读取失败' if isinstance(error, (OSError, UnicodeError)) else str(error))
             data = error_data(*(last[:2] if last is not None and not 200 <= last[0] < 300 else (None, None)))
             if code == 4 and meta is not None:
-                code, status, data, report = pending_failure(home, meta, clock(), check_secret, report)
+                code, status, data, report = pending_failure(home, meta, clock(), check_secret, report, token)
     except Exception as error:
         if known_success is not None:
-            code, status, data, report = local_record_failure(meta, known_success)
+            code, status, data, report = local_record_failure(meta, known_success, token)
         else:
             code = 4 if meta is not None or write_sent else 2
             status = 'remote_unknown' if code == 4 else 'failed'
             data = error_data()
             report = type(error).__name__
             if meta is not None:
-                code, status, data, report = pending_failure(home, meta, clock(), check_secret, report)
+                code, status, data, report = pending_failure(home, meta, clock(), check_secret, report, token)
             elif write_sent:
-                report += '\n结果未知，请用 python3 bin/docsctl.py get ' + args.doc_id + ' 核对'
+                verify = suggested_command('get', args.doc_id, token=token)
+                report += f'\n结果未知，请用 {verify} 核对'
     finally:
         recovery.close()
     result = dict(ok=code == 0, command=command, status=status, exit_code=code, data=data, report=report)
@@ -671,4 +695,7 @@ def run(argv=None, *, env=None, out=None, clock=time.time, sleep=time.sleep, rng
 
 
 if __name__ == '__main__':
+    if os.name == 'nt':
+        sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='backslashreplace')
     sys.exit(run())

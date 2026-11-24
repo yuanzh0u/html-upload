@@ -9,6 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bin'))
 import store
 from local import Stop
+from platform_support import (WINDOWS, assert_windows_private_directory,
+                              assert_windows_private_file, link_directory, private_directory)
 
 DATA = b'<!doctype html><html><title>t</title></html>'
 SHA = hashlib.sha256(DATA).hexdigest()
@@ -26,7 +28,7 @@ class StoreTests(unittest.TestCase):
         self.root = self.home / 'docs/v2'
 
     def manifest(self):
-        return [json.loads(line) for line in (self.root / 'manifest.jsonl').read_text().splitlines()]
+        return [json.loads(line) for line in (self.root / 'manifest.jsonl').read_text(encoding='utf-8').splitlines()]
 
     def mode(self, path):
         return stat.S_IMODE(path.lstat().st_mode)
@@ -36,17 +38,27 @@ class StoreTests(unittest.TestCase):
 
     def test_prepare_writes_private_files_and_manifest(self):
         meta = self.prepare()
-        self.assertEqual((self.mode(self.root), self.mode(self.root / '.pending')), (0o700, 0o700))
+        if WINDOWS:
+            assert_windows_private_directory(self.root)
+            assert_windows_private_directory(self.root / '.pending')
+        else:
+            self.assertEqual((self.mode(self.root), self.mode(self.root / '.pending')), (0o700, 0o700))
         for suffix in ('.request.json', '.meta.json'):
-            self.assertEqual(self.mode(self.root / '.pending' / (meta['client_upload_id'] + suffix)), 0o600)
+            path = self.root / '.pending' / (meta['client_upload_id'] + suffix)
+            if WINDOWS:
+                assert_windows_private_file(self, path)
+            else:
+                self.assertEqual(self.mode(path), 0o600)
         row = self.manifest()[-1]
         self.assertEqual((row['schema_version'], row['status'], row['op'], row['sha256']),
                          (2, 'prepared', 'upload', SHA))
-        self.assertNotIn('idem-1', (self.root / 'manifest.jsonl').read_text())
+        self.assertNotIn('idem-1', (self.root / 'manifest.jsonl').read_text(encoding='utf-8'))
 
     def test_prepare_refuses_symlinked_root(self):
-        (self.home / 'docs').mkdir()
-        (self.home / 'docs/v2').symlink_to(self.home)
+        private_directory(self.home / 'docs')
+        target = self.home / 'real-root'
+        private_directory(target)
+        link_directory(self.home / 'docs/v2', target)
         with self.assertRaises(Stop) as caught:
             self.prepare()
         self.assertEqual(caught.exception.code, 5)

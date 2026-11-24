@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bin'))
 import client
 import docsctl
 import store
+from platform_support import WINDOWS
 from v2_fake import FakeDocs
 
 
@@ -19,7 +20,7 @@ class UnknownOutcomeTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
         self.page = self.home / 'page.html'
-        self.page.write_text('<html><title>未知结果</title></html>')
+        self.page.write_text('<html><title>未知结果</title></html>', encoding='utf-8')
         self.fake = FakeDocs()
         self.now = 1_800_000_000
 
@@ -33,7 +34,7 @@ class UnknownOutcomeTests(unittest.TestCase):
         return code, json.loads(out.getvalue())
 
     def event_count(self):
-        return len((self.home / 'docs/v2/manifest.jsonl').read_text().splitlines())
+        return len((self.home / 'docs/v2/manifest.jsonl').read_text(encoding='utf-8').splitlines())
 
     def upload(self, **kw):
         return self.cli('upload', str(self.page), '--summary', '未知结果摘要', **kw)
@@ -53,11 +54,16 @@ class UnknownOutcomeTests(unittest.TestCase):
         self.assertEqual((code, result['status']), (4, 'remote_unknown'))
         ident = ident or result['data']['client_upload_id']
         self.assertEqual(result['data']['client_upload_id'], ident)
-        resume = 'python3 bin/docsctl.py resume ' + ident
+        if WINDOWS:
+            executable = sys.executable.replace("'", "''")
+            script = str(Path(docsctl.__file__).resolve()).replace("'", "''")
+            resume = f"& '{executable}' '{script}' resume {ident}"
+        else:
+            resume = 'python3 bin/docsctl.py resume ' + ident
         self.assertEqual(result['data']['resume_command'], resume)
         self.assertIn(resume, result['report'])
         meta, raw = store.load_pending(self.home, ident)
-        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text().splitlines()]
+        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text(encoding='utf-8').splitlines()]
         self.assertEqual(rows[-1]['status'], 'remote_unknown')
         self.assertEqual(rows[-1]['client_upload_id'], ident)
         for path in (self.home / 'docs/v2').rglob('*'):
@@ -196,5 +202,5 @@ class UnknownOutcomeTests(unittest.TestCase):
         self.assertEqual((code, result['status']), (0, 'success'))
         self.assertEqual(len(self.fake.docs), 1)
         self.assertEqual(list((self.home / 'docs/v2/.pending').iterdir()), [])
-        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text().splitlines()]
+        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text(encoding='utf-8').splitlines()]
         self.assertEqual(rows[-1]['status'], 'uploaded')

@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bin'))
 import docsctl
 import store
+from platform_support import make_public, private_directory, write_private
 from v2_fake import FakeDocs
 
 EXPIRED = '超过 24 小时，服务端已不记得这次请求，不会重发；请用 list 核对，确认没有成功的话，重新执行 upload/replace'
@@ -28,7 +29,7 @@ class ExpiryTests(unittest.TestCase):
         self.raw = FakeDocs.upload_raw()
         self.body = json.loads(self.raw)
         self.page = self.home / 'page.html'
-        self.page.write_text('<html><title>到期</title><p>正文</p></html>')
+        self.page.write_text('<html><title>到期</title><p>正文</p></html>', encoding='utf-8')
 
     def pending(self, op='upload', *, age=86400, origin=None, raw=None):
         raw = self.raw if raw is None else raw
@@ -232,19 +233,20 @@ class ExpiryTests(unittest.TestCase):
             with self.subTest(kind=kind):
                 meta = self.pending()
                 meta_path, request_path = self.paths(meta)
-                outside = self.home / ('outside-' + kind)
-                outside.write_bytes(b'private outside')
-                outside.chmod(0o600)
+                outside_dir = self.home / 'outside'
+                private_directory(outside_dir)
+                outside = outside_dir / kind
+                write_private(outside, b'private outside')
                 if kind.endswith('symlink'):
                     chosen = meta_path if kind == 'meta-symlink' else request_path
                     chosen.unlink()
                     chosen.symlink_to(outside)
                 elif kind == 'permissions':
-                    meta_path.chmod(0o644)
+                    make_public(meta_path, 0o644)
                 elif kind == 'wrong-id':
                     meta_path.write_bytes(store.canonical(dict(meta, client_upload_id='../outside')))
                 elif kind == 'invalid-json':
-                    meta_path.write_text('{broken')
+                    meta_path.write_text('{broken', encoding='utf-8')
                 else:
                     meta_path.write_bytes(store.canonical(dict(meta, title=self.fake.key)))
                 self.assertEqual(self.cli('me')[0], 0)
@@ -256,15 +258,14 @@ class ExpiryTests(unittest.TestCase):
 
     def test_startup_ignores_arbitrary_names_and_nonprivate_pending_directory(self):
         meta = self.pending()
-        arbitrary = self.paths(meta)[0].parent / '../not-a-pending.meta.json'
-        arbitrary.write_bytes(self.paths(meta)[0].read_bytes())
-        arbitrary.chmod(0o600)
-        self.paths(meta)[0].parent.chmod(0o755)
+        arbitrary = self.paths(meta)[0].parent.parent / 'not-a-pending.meta.json'
+        write_private(arbitrary, self.paths(meta)[0].read_bytes())
+        make_public(self.paths(meta)[0].parent, 0o755)
         self.cli('me')
         self.assertTrue(arbitrary.exists())
         self.assertTrue(all(p.exists() for p in self.paths(meta)))
         self.assertEqual([r['status'] for r in [json.loads(l) for l in
-                         (self.home / 'docs/v2/manifest.jsonl').read_text().splitlines()]], ['prepared'])
+                         (self.home / 'docs/v2/manifest.jsonl').read_text(encoding='utf-8').splitlines()]], ['prepared'])
 
     def test_startup_validates_credential_before_touching_expired_archive(self):
         meta = self.pending()

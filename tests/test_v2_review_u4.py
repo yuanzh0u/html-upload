@@ -18,7 +18,7 @@ class ReplayReportTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
         self.page = self.home / 'page.html'
-        self.page.write_text('<html><title>重试报告</title></html>')
+        self.page.write_text('<html><title>重试报告</title></html>', encoding='utf-8')
         self.fake = FakeDocs()
         self.write_statuses = []
 
@@ -48,7 +48,7 @@ class ReplayReportTests(unittest.TestCase):
         self.assertIn('以下分享报告来自首次请求；当前分享范围可能已变化，请到网页核对。', result['report'])
         self.assertNotIn('目前只有你自己能看', result['report'])
         self.assertEqual(list((self.home / 'docs/v2/.pending').iterdir()), [])
-        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text().splitlines()]
+        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text(encoding='utf-8').splitlines()]
         self.assertEqual(rows[-1]['status'], 'uploaded')
 
     def test_applied_upload_with_lost_response_then_200_has_no_new_hint(self):

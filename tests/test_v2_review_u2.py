@@ -25,7 +25,7 @@ class ReplacementVersionTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
         self.page = self.home / 'replacement.html'
-        self.page.write_text('<html><title>正文版本</title><body>旧替换</body></html>')
+        self.page.write_text('<html><title>正文版本</title><body>旧替换</body></html>', encoding='utf-8')
         self.fake = FakeDocs()
         self.fake.seed(1)
         self.ident = next(iter(self.fake.docs))
@@ -55,7 +55,7 @@ class ReplacementVersionTests(unittest.TestCase):
         self.assertEqual(result['report'], SUPERSEDED)
         self.assertNotIn('resume_command', result['data'])
         self.assertEqual(len([c for c in self.fake.calls if c['method'] == 'PUT']), before)
-        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text().splitlines()]
+        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text(encoding='utf-8').splitlines()]
         row = [row for row in rows if row['client_upload_id'] == ident][-1]
         self.assertEqual((row['status'], row['error']), ('failed', 'superseded'))
         self.assertTrue(all(not path.exists() for path in self.files(ident)))
@@ -68,12 +68,12 @@ class ReplacementVersionTests(unittest.TestCase):
             if args[0] == 'PUT':
                 files = list((self.home / 'docs/v2/.pending').glob('*.meta.json'))
                 self.assertEqual(len(files), 1)
-                self.assertEqual(json.loads(files[0].read_text()).get('content_updated_at'), version)
+                self.assertEqual(json.loads(files[0].read_text(encoding='utf-8')).get('content_updated_at'), version)
             return self.fake.transport(*args)
         self.fake.fail_next = ['network'] * 6
         code, result = self.cli('replace', self.ident, str(self.page), '--summary', '旧替换', transport=transport)
         self.assertEqual(code, 4)
-        meta = json.loads(self.files(result['data']['client_upload_id'])[0].read_text())
+        meta = json.loads(self.files(result['data']['client_upload_id'])[0].read_text(encoding='utf-8'))
         self.assertEqual(meta.get('content_updated_at'), version)
         self.assertEqual([(c['method'], c['path']) for c in self.fake.calls[:2]],
                          [('GET', '/api/v2/me'), ('GET', '/api/v2/documents/' + self.ident)])
@@ -81,7 +81,7 @@ class ReplacementVersionTests(unittest.TestCase):
     def test_unchanged_version_resume_preserves_original_bytes_and_key(self):
         ident = self.pending()
         meta_file, request_file = self.files(ident)
-        meta, raw = json.loads(meta_file.read_text()), request_file.read_bytes()
+        meta, raw = json.loads(meta_file.read_text(encoding='utf-8')), request_file.read_bytes()
         before = len(self.fake.calls)
         code, result = self.cli('resume', ident)
         self.assertEqual((code, result['data']['id']), (0, self.ident))
@@ -95,7 +95,7 @@ class ReplacementVersionTests(unittest.TestCase):
 
     def test_unapplied_old_replace_is_superseded_by_later_replacement(self):
         ident = self.pending()
-        self.page.write_text('<html><title>新正文</title><body>较新内容</body></html>')
+        self.page.write_text('<html><title>新正文</title><body>较新内容</body></html>', encoding='utf-8')
         self.assertEqual(self.cli('replace', self.ident, str(self.page), '--summary', '较新替换')[0], 0)
         before = len([c for c in self.fake.calls if c['method'] == 'PUT'])
         self.assert_superseded(ident, before)
@@ -114,12 +114,12 @@ class ReplacementVersionTests(unittest.TestCase):
             with self.subTest(version=version):
                 ident = self.pending()
                 meta_file, request_file = self.files(ident)
-                meta = json.loads(meta_file.read_text())
+                meta = json.loads(meta_file.read_text(encoding='utf-8'))
                 if version is None:
                     meta.pop('content_updated_at', None)
                 else:
                     meta['content_updated_at'] = version
-                meta_file.write_text(json.dumps(meta))
+                meta_file.write_text(json.dumps(meta), encoding='utf-8')
                 before = [path.read_bytes() for path in (meta_file, request_file)]
                 puts = len([c for c in self.fake.calls if c['method'] == 'PUT'])
                 code, result = self.cli('resume', ident)
@@ -211,7 +211,7 @@ class ReplacementVersionIntegrationTests(unittest.TestCase):
         self.assertEqual(self.puts, puts)
         self.assertEqual(self.cli('get', doc_id)[1]['data'], before)
         self.assertEqual({str(path.relative_to(self.root)): path.read_bytes() for path in self.root.rglob('*') if path.is_file()}, saved)
-        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text().splitlines()]
+        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text(encoding='utf-8').splitlines()]
         row = [row for row in rows if row['client_upload_id'] == ident][-1]
         self.assertEqual((row['status'], row['error']), ('failed', 'superseded'))
         self.assertEqual(list((self.home / 'docs/v2/.pending').iterdir()), [])

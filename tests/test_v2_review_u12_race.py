@@ -14,6 +14,8 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bin'))
 import docsctl
 import store
+from platform_support import (WINDOWS, assert_windows_private_directory,
+                              assert_windows_private_file, make_public, private_directory, write_private)
 from v2_fake import FakeDocs
 
 
@@ -106,9 +108,15 @@ class ActiveRecoveryRaceTests(unittest.TestCase):
         self.assertTrue(all(not p.exists() for p in self.paths()))
         self.assertEqual([c for c in self.fake.calls if c['method'] != 'GET'], [])
         locks = self.home / 'docs/v2/.archive-locks'
-        self.assertEqual(stat.S_IMODE(locks.stat().st_mode), 0o700)
+        if WINDOWS:
+            assert_windows_private_directory(locks)
+        else:
+            self.assertEqual(stat.S_IMODE(locks.stat().st_mode), 0o700)
         for path in locks.iterdir():
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            if WINDOWS:
+                assert_windows_private_file(self, path)
+            else:
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             self.assertEqual(path.read_bytes(), b'')
 
     def test_sweep_snapshot_cannot_append_abandoned_after_concurrent_uploaded(self):
@@ -165,17 +173,18 @@ class ActiveRecoveryRaceTests(unittest.TestCase):
                     self.home.mkdir()
                 else:
                     locks = self.home / 'docs/v2/.archive-locks'
-                    locks.mkdir(mode=0o700, exist_ok=True)
+                    private_directory(locks)
                     lock = locks / (self.meta['client_upload_id'] + '.lock')
                     lock.unlink(missing_ok=True)
                     if kind == 'symlink':
-                        target = self.home / 'outside-lock'
-                        target.write_bytes(b'unchanged')
-                        target.chmod(0o600)
+                        outside = self.home / 'outside'
+                        private_directory(outside)
+                        target = outside / 'lock'
+                        write_private(target, b'unchanged')
                         lock.symlink_to(target)
                     else:
-                        lock.write_bytes(b'')
-                        lock.chmod(0o644)
+                        write_private(lock, b'')
+                        make_public(lock, 0o644)
                 def no_network(*args):
                     self.fail('unsafe/missing archive lock must not use network')
                 code, value = self.cli(['resume', self.meta['client_upload_id']], no_network)

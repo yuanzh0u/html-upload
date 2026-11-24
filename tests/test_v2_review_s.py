@@ -17,6 +17,9 @@ import docsctl
 import fields
 import local
 import store
+from platform_support import (WINDOWS, assert_windows_private_directory, assert_windows_private_file,
+                              edit_acl, link_directory, make_public, private_directory,
+                              windows_handle_path, write_credential)
 from v2_fake import FakeDocs
 
 
@@ -48,6 +51,13 @@ def lock_probe_worker(home, number, entered, release, attempted):
 
 @contextmanager
 def utc_timezone():
+    if WINDOWS:
+        class UTCDateTime(datetime):
+            def astimezone(self, tz=None):
+                return super().astimezone(timezone.utc if tz is None else tz)
+        with patch.object(docsctl, 'datetime', UTCDateTime):
+            yield
+        return
     try:
         with patch.dict(os.environ, {'TZ': 'UTC'}):
             time.tzset()
@@ -62,7 +72,7 @@ class SmallReviewTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
         self.page = self.home / 'page.html'
-        self.page.write_text('<!doctype html><html><title>测试标题</title><p>正文</p></html>')
+        self.page.write_text('<!doctype html><html><title>测试标题</title><p>正文</p></html>', encoding='utf-8')
         self.fake = FakeDocs()
         self.now = time.time()
 
@@ -108,8 +118,43 @@ class SmallReviewTests(unittest.TestCase):
         self.assertEqual(self.fake.calls, [])
         self.assertFalse((self.home / 'docs').exists())
 
+    def windows_directory_race(self, target, winner='private'):
+        import ctypes
+        import fs_windows
+
+        mkdir = fs_windows._mkdir
+        raced = []
+        def competing_create(path, attributes):
+            if Path(path) != target:
+                return mkdir(path, attributes)
+            if winner in ('private', 'public'):
+                self.assertTrue(mkdir(path, attributes))
+                if winner == 'public':
+                    make_public(target, 0o755)
+            elif winner == 'junction':
+                safe = self.home / 'safe'
+                private_directory(safe)
+                link_directory(target, safe)
+            else:
+                target.write_text('regular file', encoding='utf-8')
+            raced.append(target)
+            ctypes.set_last_error(183)  # ERROR_ALREADY_EXISTS
+            return False
+
+        with patch.object(fs_windows, '_mkdir', side_effect=competing_create):
+            if winner == 'private':
+                local.secure_directory(target, create=True)
+            else:
+                with self.assertRaises(local.Stop):
+                    local.secure_directory(target, create=True)
+        self.assertEqual(raced, [target])
+
     def test_s2_directory_create_race_revalidates_safe_winner(self):
         target = self.home / 'private'
+        if WINDOWS:
+            self.windows_directory_race(target)
+            assert_windows_private_directory(target)
+            return
         mkdir = Path.mkdir
         raced = []
         def competing_create(path, *args, **kwargs):
@@ -127,6 +172,11 @@ class SmallReviewTests(unittest.TestCase):
         self.assertEqual(target.stat().st_mode & 0o777, 0o700)
 
     def test_s2_directory_create_race_rejects_unsafe_winner(self):
+        if WINDOWS:
+            for winner in ('public', 'junction', 'file'):
+                with self.subTest(winner=winner):
+                    self.windows_directory_race(self.home / winner, winner)
+            return
         mkdir = Path.mkdir
         for kind in ('mode', 'symlink', 'file', 'owner'):
             with self.subTest(kind=kind):
@@ -139,7 +189,7 @@ class SmallReviewTests(unittest.TestCase):
                         mkdir(safe, mode=0o700)
                         path.symlink_to(safe, target_is_directory=True)
                     elif kind == 'file':
-                        path.write_text('regular file')
+                        path.write_text('regular file', encoding='utf-8')
                     else:
                         mkdir(path, mode=0o700 if kind == 'owner' else 0o755)
                         path.chmod(0o700 if kind == 'owner' else 0o755)
@@ -226,10 +276,10 @@ class SmallReviewTests(unittest.TestCase):
 
     def test_s3_invalid_resume_id_never_selects_arbitrary_history_path(self):
         outside = self.home / 'outside'
-        outside.write_text('untouched')
+        outside.write_text('untouched', encoding='utf-8')
         code, _ = self.offline('../outside')
         self.assertEqual(code, 4)
-        self.assertEqual(outside.read_text(), 'untouched')
+        self.assertEqual(outside.read_text(encoding='utf-8'), 'untouched')
         self.assertFalse((self.home / 'docs').exists())
 
     def test_s4_valid_extreme_expiry_never_reverses_finalized_upload_or_replace(self):
@@ -367,10 +417,7 @@ class CredentialAndConcurrencyTests(unittest.TestCase):
         self.home = Path(temporary.name)
         self.key = 'fake-key-S8-credential-only'
         self.keyfile = self.home / '.config/docs/api-key'
-        self.keyfile.parent.mkdir(parents=True, mode=0o700)
-        self.keyfile.parent.chmod(0o700)
-        self.keyfile.write_text(self.key + '\n')
-        self.keyfile.chmod(0o600)
+        write_credential(self.keyfile, self.key + '\n')
         # No environment credential: every test exercises the temporary file.
         self.env = {'HOME': str(self.home)}
         self.assertNotIn('DOCS_API_KEY', self.env)
@@ -387,18 +434,40 @@ class CredentialAndConcurrencyTests(unittest.TestCase):
             self.fail('unsafe credential file/directory was accepted')
 
     def test_s8_credential_accepts_only_private_directory_and_file(self):
-        self.assertEqual(self.keyfile.parent.stat().st_mode & 0o777, 0o700)
-        self.assertEqual(self.keyfile.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(self.keyfile.stat().st_uid, os.geteuid())
+        if WINDOWS:
+            assert_windows_private_directory(self.keyfile.parent)
+            assert_windows_private_file(self, self.keyfile)
+        else:
+            self.assertEqual(self.keyfile.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(self.keyfile.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(self.keyfile.stat().st_uid, os.geteuid())
         self.assertEqual(self.credential(), self.key)
 
+    def reject_windows_public_acl(self, path):
+        for sid in ('S-1-1-0', 'S-1-5-32-545', 'S-1-5-11'):
+            with self.subTest(sid=sid):
+                edit_acl(path, '/grant', f'*{sid}:(R)')
+                try:
+                    self.rejected()
+                finally:
+                    edit_acl(path, '/remove:g', f'*{sid}')
+                self.assertEqual(self.credential(), self.key)
+        edit_acl(path, '/inheritance:e')
+        self.rejected()
+
     def test_s8_credential_rejects_non0700_directory(self):
+        if WINDOWS:
+            self.reject_windows_public_acl(self.keyfile.parent)
+            return
         for mode in (0o755, 0o750, 0o770, 0o777):
             with self.subTest(mode=oct(mode)):
                 self.keyfile.parent.chmod(mode)
                 self.rejected()
 
     def test_s8_credential_rejects_non0600_file(self):
+        if WINDOWS:
+            self.reject_windows_public_acl(self.keyfile)
+            return
         for mode in (0o644, 0o640, 0o660, 0o400, 0o700):
             with self.subTest(mode=oct(mode)):
                 self.keyfile.chmod(mode)
@@ -406,19 +475,35 @@ class CredentialAndConcurrencyTests(unittest.TestCase):
 
     def test_s8_credential_rejects_file_symlink(self):
         target = self.home / 'actual-key'
+        if WINDOWS:
+            outside = self.home / 'outside'
+            private_directory(outside)
+            target = outside / 'actual-key'
         self.keyfile.rename(target)
         self.keyfile.symlink_to(target)
         self.rejected()
-        self.assertEqual(target.read_text(), self.key + '\n')
+        self.assertEqual(target.read_text(encoding='utf-8'), self.key + '\n')
 
     def test_s8_credential_rejects_directory_symlink(self):
         target = self.home / 'actual-directory'
         self.keyfile.parent.rename(target)
-        self.keyfile.parent.symlink_to(target, target_is_directory=True)
+        link_directory(self.keyfile.parent, target)
         self.rejected()
-        self.assertEqual((target / 'api-key').read_text(), self.key + '\n')
+        self.assertEqual((target / 'api-key').read_text(encoding='utf-8'), self.key + '\n')
 
     def foreign_owner(self, target):
+        if WINDOWS:
+            import fs_windows
+
+            private = fs_windows._private
+            target = target.resolve()
+
+            def actual_descriptor_with_other_expected_owner(handle):
+                if windows_handle_path(handle) == target:
+                    with patch.object(fs_windows, '_current_sid', return_value='S-1-1-0'):
+                        return private(handle)
+                return private(handle)
+            return patch.object(fs_windows, '_private', side_effect=actual_descriptor_with_other_expected_owner)
         lstat = Path.lstat
         def metadata(path, *args, **kwargs):
             info = lstat(path, *args, **kwargs)

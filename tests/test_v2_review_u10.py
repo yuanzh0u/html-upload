@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bin'))
 import docsctl
+from platform_support import write_credential
 from v2_fake import FakeDocs
 
 KEY = 'fake-u10-key-000000000000'
@@ -25,7 +26,7 @@ class HomeResolutionTests(unittest.TestCase):
         self.cwd = self.root / 'cwd'
         self.cwd.mkdir()
         self.page = self.root / 'page.html'
-        self.page.write_text('<!doctype html><html><title>家目录测试</title><p>正文</p></html>')
+        self.page.write_text('<!doctype html><html><title>家目录测试</title><p>正文</p></html>', encoding='utf-8')
         self.fake = FakeDocs(key=KEY)
         environment = patch.dict(os.environ, {'HOME': str(self.home), 'DOCS_API_KEY': KEY,
                                               'DOCS_ORIGIN': self.fake.origin})
@@ -36,11 +37,7 @@ class HomeResolutionTests(unittest.TestCase):
         self.addCleanup(os.chdir, previous)
 
     def put_key(self, home):
-        folder = home / '.config/docs'
-        folder.mkdir(parents=True, mode=0o700)
-        path = folder / 'api-key'
-        path.write_text(KEY)
-        path.chmod(0o600)
+        write_credential(home / '.config/docs/api-key', KEY)
 
     def cli(self, environment):
         output = io.StringIO()
@@ -62,11 +59,11 @@ class HomeResolutionTests(unittest.TestCase):
         self.assertEqual(code, 4, result['report'])
         ident = result['data']['client_upload_id']
         pending = self.home / 'docs/v2/.pending'
-        meta = json.loads((pending / (ident + '.meta.json')).read_text())
+        meta = json.loads((pending / (ident + '.meta.json')).read_text(encoding='utf-8'))
         request = (pending / (ident + '.request.json')).read_bytes()
         self.assertEqual(meta['origin'], self.fake.origin)
         self.assertEqual(json.loads(request)['title'], '家目录测试')
-        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text().splitlines()]
+        rows = [json.loads(line) for line in (self.home / 'docs/v2/manifest.jsonl').read_text(encoding='utf-8').splitlines()]
         self.assertEqual(rows[-1]['status'], 'remote_unknown')
         self.assertTrue(self.fake.calls)
         self.assertEqual(list(self.cwd.iterdir()), [])

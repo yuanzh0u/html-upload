@@ -8,6 +8,7 @@ import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
 class Shell(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'posix', 'POSIX shell and file mode test')
     def test_posix_core_syntax_and_private_write(self):
         script=ROOT/'tests/credentials-core.sh'
         for shell in ('bash','zsh'):

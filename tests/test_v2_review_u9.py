@@ -1,6 +1,6 @@
 """U9: torn history recovery and ownership-safe prepare rollback."""
 import base64
-from contextlib import redirect_stderr
+from contextlib import nullcontext, redirect_stderr
 import hashlib
 import io
 import json
@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'bin'))
 import docsctl
 import store
 from local import Stop
+from platform_support import WINDOWS, make_public, restore_private_file, windows_handle_path, write_private
 from v2_fake import FakeDocs
 
 HTML = b'<!doctype html><html><title>u9</title><p>body</p></html>'
@@ -55,8 +56,7 @@ class ManifestRecoveryTests(unittest.TestCase):
                              origin='http://127.0.0.1:9')
 
     def write_history(self, raw):
-        self.history.write_bytes(raw)
-        self.history.chmod(0o600)
+        write_private(self.history, raw)
 
     def reader(self):
         self.assertTrue(callable(getattr(store, 'read_manifest', None)),
@@ -91,7 +91,7 @@ class ManifestRecoveryTests(unittest.TestCase):
         meta = self.prepare()
         first = self.history.read_bytes()
         invalid = b'not-json\n\xff\nnull\n[]\n"text"\n{}\n{"schema_version":2}\n'
-        self.write_history(first + invalid)
+        self.history.write_bytes(first + invalid)
         store.record(self.home, meta, 'remote_unknown', NOW + 1)
         with redirect_stderr(io.StringIO()) as warning:
             rows = self.reader()(self.home)
@@ -102,7 +102,7 @@ class ManifestRecoveryTests(unittest.TestCase):
     def test_reader_preserves_complete_json_without_final_newline(self):
         self.prepare()
         original = self.history.read_bytes()
-        self.write_history(original.rstrip(b'\n'))
+        self.history.write_bytes(original.rstrip(b'\n'))
         self.assertEqual(self.reader()(self.home), [json.loads(original)])
         self.assertEqual(self.history.read_bytes(), original.rstrip(b'\n'))
 
@@ -118,11 +118,11 @@ class ManifestRecoveryTests(unittest.TestCase):
     def test_reader_rejects_unsafe_history_and_lock_without_echoing_file_data(self):
         reader = self.reader()
         self.write_history(KEY.encode())
-        self.history.chmod(0o644)
+        make_public(self.history, 0o644)
         with self.assertRaises(Stop) as caught:
             reader(self.home)
         self.assertNotIn(KEY, str(caught.exception))
-        self.history.chmod(0o600)
+        restore_private_file(self.history)
         lock = self.root / '.manifest.lock'
         lock.unlink(missing_ok=True)
         lock.symlink_to(self.history)
@@ -137,7 +137,7 @@ class ManifestRecoveryTests(unittest.TestCase):
         row = json.loads(self.history.read_bytes())
         row.update(event_id='a' * 32, status='remote_unknown')
         appended = json.dumps(row).encode() + b'\n'
-        context = multiprocessing.get_context('fork')
+        context = multiprocessing.get_context('spawn' if WINDOWS else 'fork')
         start, reading = context.Event(), context.Event()
         receiver, sender = context.Pipe(duplex=False)
         process = context.Process(target=read_in_process, args=(self.home, start, reading, sender))
@@ -172,7 +172,7 @@ class ManifestRecoveryTests(unittest.TestCase):
         self.write_history(b'{"untrusted":"' + fake.key.encode())
         warnings = io.StringIO()
         for number in (1, 2):
-            page.write_text(f'<!doctype html><html><title>page {number}</title><p>body</p></html>')
+            page.write_text(f'<!doctype html><html><title>page {number}</title><p>body</p></html>', encoding='utf-8')
             output = io.StringIO()
             with redirect_stderr(warnings):
                 code = docsctl.run(['upload', str(page), '--summary', 'summary'],
@@ -202,8 +202,7 @@ class PrepareCleanupTests(unittest.TestCase):
         self.root = store.directories(self.home, True)
         self.pending = self.root / '.pending'
         self.unrelated = self.pending / ('8' * 32 + '.request.json')
-        self.unrelated.write_bytes(b'existing unrelated archive')
-        self.unrelated.chmod(0o600)
+        write_private(self.unrelated, b'existing unrelated archive')
 
     def prepare(self, **kwargs):
         with patch('store.secrets.token_hex', return_value=IDENT):
@@ -223,9 +222,14 @@ class PrepareCleanupTests(unittest.TestCase):
         self.assertEqual(self.unrelated.read_bytes(), b'existing unrelated archive')
 
     def fail_file_stage(self, suffix, stage):
-        original_fdopen, original_fchmod, original_fsync = os.fdopen, os.fchmod, os.fsync
+        original_fdopen, original_fsync = os.fdopen, os.fsync
         target = self.root / 'manifest.jsonl' if suffix == 'manifest' else self.pending / (IDENT + suffix)
+        resolved_target = target.parent.resolve() / target.name if WINDOWS else target
+
         def matches(fd):
+            if WINDOWS:
+                import msvcrt
+                return windows_handle_path(msvcrt.get_osfhandle(fd)) == resolved_target
             return os.readlink('/proc/self/fd/' + str(fd)) == str(target)
         class Stream:
             def __init__(self, wrapped):
@@ -252,16 +256,27 @@ class PrepareCleanupTests(unittest.TestCase):
                 raise OSError('stream creation ' + KEY)
             wrapped = original_fdopen(fd, *args, **kwargs)
             return Stream(wrapped) if matches(fd) and stage in ('write', 'flush') else wrapped
-        def fchmod(fd, mode):
-            if stage == 'chmod' and matches(fd):
-                raise OSError('chmod ' + KEY)
-            return original_fchmod(fd, mode)
         def fsync(fd):
             if stage == 'fsync' and matches(fd):
                 raise OSError('fsync ' + KEY)
             return original_fsync(fd)
-        with patch('store.os.fdopen', side_effect=fdopen), patch('store.os.fchmod', side_effect=fchmod), \
-             patch('store.os.fsync', side_effect=fsync):
+        permissions = nullcontext()
+        if WINDOWS and stage == 'chmod':
+            import fs_windows
+            open_path = fs_windows._open
+            def create_with_acl(path, *args, **kwargs):
+                if path == target and kwargs.get('disposition') == 1:
+                    raise PermissionError('private create ' + KEY)
+                return open_path(path, *args, **kwargs)
+            permissions = patch.object(fs_windows, '_open', side_effect=create_with_acl)
+        elif not WINDOWS:
+            original_fchmod = os.fchmod
+            def fchmod(fd, mode):
+                if stage == 'chmod' and matches(fd):
+                    raise OSError('chmod ' + KEY)
+                return original_fchmod(fd, mode)
+            permissions = patch('store.os.fchmod', side_effect=fchmod)
+        with permissions, patch('store.os.fdopen', side_effect=fdopen), patch('store.os.fsync', side_effect=fsync):
             self.assert_rollback(self.prepare)
 
     def test_request_partial_write_failure_removes_partial_file(self):
@@ -340,8 +355,8 @@ class PrepareCleanupTests(unittest.TestCase):
     def test_request_collision_preserves_preexisting_archives(self):
         request = self.pending / (IDENT + '.request.json')
         meta = self.pending / (IDENT + '.meta.json')
-        request.write_bytes(b'original request')
-        meta.write_bytes(b'original meta')
+        write_private(request, b'original request')
+        write_private(meta, b'original meta')
         with self.assertRaises(Stop) as caught:
             self.prepare()
         self.assertEqual(caught.exception.code, 5)
@@ -352,7 +367,7 @@ class PrepareCleanupTests(unittest.TestCase):
     def test_meta_collision_preserves_preexisting_meta_and_cleans_new_request(self):
         request = self.pending / (IDENT + '.request.json')
         meta = self.pending / (IDENT + '.meta.json')
-        meta.write_bytes(b'original meta')
+        write_private(meta, b'original meta')
         with self.assertRaises(Stop) as caught:
             self.prepare()
         self.assertEqual(caught.exception.code, 5)
@@ -381,7 +396,8 @@ class PrepareCleanupTests(unittest.TestCase):
         self.fail_file_stage('.meta.json', 'fdopen')
 
     def test_cleanup_failure_keeps_code5_and_continues_removing_other_owned_files(self):
-        original_unlink = Path.unlink
+        backend, operation = (store.fs, 'remove') if WINDOWS else (Path, 'unlink')
+        original_unlink = getattr(backend, operation)
         request = self.pending / (IDENT + '.request.json')
         meta = self.pending / (IDENT + '.meta.json')
         def unlink(path, *args, **kwargs):
@@ -389,7 +405,7 @@ class PrepareCleanupTests(unittest.TestCase):
                 raise OSError('cleanup denied ' + KEY)
             return original_unlink(path, *args, **kwargs)
         with patch('store.record', side_effect=OSError('record denied ' + KEY)), \
-             patch.object(Path, 'unlink', new=unlink):
+             patch.object(backend, operation, new=unlink):
             with self.assertRaises(Stop) as caught:
                 self.prepare()
         self.assertEqual(caught.exception.code, 5)

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import private_fs as fs
 from fields import MAX_HTML, MAX_SOURCE_INFO, FieldError, clean_title
 
 PRODUCTION = 'https://docs.zh0uyuan.com'
@@ -31,29 +32,14 @@ def origin_from(env):
 
 def secure_directory(path, create=False):
     try:
-        if create and not path.exists() and not path.is_symlink():
-            try:
-                path.mkdir(mode=0o700)
-            except FileExistsError:
-                pass  # A concurrent creator must pass the same checks below.
-        info = path.lstat()
-        if (not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode)!=0o700 or info.st_uid!=os.geteuid()):
-            raise Stop('本地私有目录类型、属主或权限不符')
+        fs.secure_directory(path, create)
     except OSError:
         raise Stop('本地私有目录或文件无法安全访问') from None
 
 
 def private_read(path, limit):
     try:
-        info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode)!=0o600 or info.st_uid!=os.geteuid():
-            raise Stop('私有文件类型、属主或权限不符')
-        fd = os.open(path, os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
-        with os.fdopen(fd,'rb') as stream:
-            actual = os.fstat(stream.fileno())
-            if (actual.st_dev,actual.st_ino)!=(info.st_dev,info.st_ino): raise Stop('文件打开时变化')
-            data = stream.read(limit)
-        return data
+        return fs.private_read(path, limit)
     except OSError:
         raise Stop('本地私有目录或文件无法安全访问') from None
 
@@ -81,13 +67,17 @@ def credential(env, home):
 def read_html(path, *, forbidden=None):
     try:
         path = Path(path)
-        info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or path.suffix.lower() != '.html':
+        if path.suffix.lower() != '.html':
             raise Stop('需要非符号链接的本地普通 .html 文件')
-        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | os.O_NONBLOCK)
+        # The Windows backend validates and pins the complete path before opening.
+        info = None if os.name == 'nt' else path.lstat()
+        if info is not None and not stat.S_ISREG(info.st_mode):
+            raise Stop('需要非符号链接的本地普通 .html 文件')
+        fd = fs.source_fd(path)
         with os.fdopen(fd, 'rb') as stream:
             opened = os.fstat(stream.fileno())
-            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            if not stat.S_ISREG(opened.st_mode) or (info is not None and
+                    (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)):
                 raise Stop('源文件在打开前发生变化')
             data = bytearray()
             needle = forbidden.encode() if forbidden else None
@@ -224,3 +214,10 @@ def build_source_info(inspected, path):
             del result[key]
     return result
 
+
+
+def read_summary(path):
+    if os.name == 'nt':
+        with os.fdopen(fs.source_fd(path), 'rb') as stream:
+            return stream.read()
+    return Path(path).read_bytes()

@@ -1,12 +1,23 @@
----
-verified: no
-reason: 方案撰写与 Linux 实施机没有 PowerShell。禁止写入未运行的命令。
----
+# Windows 凭据与运行环境
 
-# Windows 凭证边界
+使用 Windows x64、PowerShell 5.1 或以上和 Python 3.12 或以上。从本地 NTFS 磁盘上的技能目录运行。解释器未加入 PATH 时，使用 PowerShell 的调用运算符 `&` 和解释器的完整路径。
 
-凭证引导尚未在本 PowerShell 版本验证。原生 Windows 尚不受当前 POSIX 客户端支持，不改跑 POSIX 段落，不写 manifest；不要承诺该平台能返回规范 JSON 或退出码。
+## 首次配置
 
-未执行的 API 名称：`Read-Host -AsSecureString`。本文件不提供命令。设计要求后续真实 PowerShell 实验只在一次写文件期间转换明文，目标为用户家目录 .config/docs/api-key，并核验 NTFS 仅当前用户可读写的 ACL。只有真实实验附版本、日期、命令、ACL 与历史检查记录后，才能改为 verified: yes。
+在自己的交互终端执行以下命令。仅在出现输入提示后输入 Key。需要生成 Key 时，可在已登录的 [API Key 页面](https://docs.zh0uyuan.com/keys) 操作。
 
-Key 页面为 https://docs.zh0uyuan.com/keys；登录后生成或重新生成，明文只显示一次，不要贴进聊天或写进明文命令、历史记录。客户端需要 python3 3.12 或以上；当前实现依赖 POSIX 文件权限与锁，不能将未验证的原生 Windows 环境当作可用平台。已配置的 DOCS_API_KEY 优先，空值也不回退文件；文件来源为 ~/.config/docs/api-key，但本文不提供未经验证的配置命令。
+```powershell
+python.exe .\bin\configure_key.py --prompt
+```
+
+配置器使用 Python 标准库隐藏输入，终端无法隐藏时会停止。成功时显示 `API Key saved.`。此入口适用于限制运行 PowerShell 脚本的环境。主机策略允许运行本地脚本时，也可执行 `.\bin\configure-key.ps1 -Python python.exe`，通过 PowerShell 的安全提示输入。
+
+## 文件位置与权限
+
+非空 `HOME` 优先，否则使用 Python 当前用户的家目录。工具将 Key 原子写入该目录下的 `.config\docs\api-key`。已有 `DOCS_API_KEY` 环境变量优先，空值会报错。不要将 Key 写入命令参数、聊天或示例脚本。
+
+凭据与本地档案存放在固定 NTFS 磁盘的普通目录。配置器检查现有 `.config`、`.config\docs` 和凭据文件的私有权限，客户端也检查档案父目录 `docs`。如果这些目录由其他工具管理且 ACL 不兼容，可为技能设置独立的绝对 `HOME`，始终在同一环境恢复档案。工具拒绝网络盘、重解析路径及授予其他用户访问权的私有对象。
+
+## 验证
+
+从技能目录运行 `python.exe .\bin\docsctl.py --help` 可以离线检查解释器与 CLI。原生实机与联调的范围见[验收记录](../docs/windows-validation.md)。

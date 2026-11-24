@@ -7,7 +7,11 @@ on:
 
 jobs:
   unittest:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -15,4 +19,4 @@ jobs:
         with:
           python-version: '3.12'
       - name: Run all tests
-        run: python3.12 -m unittest discover -s tests
+        run: python -m unittest discover -s tests -v

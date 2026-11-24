@@ -7,7 +7,7 @@ description: 用户需要上传本机的单个 HTML、拿回链接、替换正�
 
 ## 依赖与前提
 
-依赖契约 docs-api v2；工具先检查主版本，不符时报错退出，不降级。需要 `python3` 3.12 或以上，只用标准库。以下命令从技能目录执行。
+依赖契约 docs-api v2；工具先检查主版本，不符时报错退出，不降级。需要 Python 3.12 或以上，只用标准库。以下命令从技能目录执行。Windows x64 使用本机固定 NTFS 磁盘，在 PowerShell 中将示例的 `python3` 换为 `python.exe` 或指定解释器的完整路径。
 
 Key 的配置和平台边界见 [POSIX 凭据](references/credentials-posix.md)、[Windows 凭据](references/credentials-windows.md)；按当前平台读取。站点固定为 `https://docs.zh0uyuan.com`，没有指定站点的参数；`DOCS_ORIGIN` 的 localhost / 127.0.0.1 回环地址仅供隔离测试。
 

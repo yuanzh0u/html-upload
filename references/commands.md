@@ -1,6 +1,8 @@
 # 命令参考
 
-所有命令使用 `python3 bin/docsctl.py`，需要 Python 3.12 以上；不提供 Key 或站点参数。需要联网的业务调用先检查 docs-api 主版本；已有可信 success 的 resume 只做离线补记。`--help` 显示文本帮助且退出 0，不发业务请求。以 `-` 开头的选项值须用等号连接，例如 `--summary=-x`；参数错误只给固定提示，不回显参数值。
+POSIX 使用 `python3 bin/docsctl.py`，Windows PowerShell 使用 `python.exe .\bin\docsctl.py`，需要 Python 3.12 或以上；不提供 Key 或站点参数。需要联网的业务调用先检查 docs-api 主版本；已有可信 success 的 resume 只做离线补记。`--help` 显示文本帮助且退出 0，不发业务请求。以 `-` 开头的选项值须用等号连接，例如 `--summary=-x`；参数错误只给固定提示，不回显参数值。
+
+Windows CLI 向管道写 UTF-8。PowerShell 5.1 解析 JSON 前可在当前会话设置 `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)`。报告中的 Windows 恢复命令包含解释器和脚本的绝对路径，可以在其他工作目录执行。
 
 ## 公共输出与字段
 
