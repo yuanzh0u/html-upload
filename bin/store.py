@@ -2,7 +2,6 @@
 import base64
 from contextlib import contextmanager
 from datetime import datetime, timezone
-import fcntl
 import hashlib
 import json
 import math
@@ -12,6 +11,7 @@ import re
 import secrets
 import stat
 import sys
+import private_fs as fs
 from local import Stop, private_read, secure_directory
 from fields import clean_doc_id
 
@@ -26,11 +26,7 @@ def canonical(value):
 
 
 def sync_dir(path):
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    fs.sync_dir(path)
 
 
 def discard_created(paths):
@@ -48,30 +44,14 @@ def discard_created(paths):
 
 
 def exclusive_write(path, data):
-    # An O_EXCL collision never gives this call ownership of the existing file.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    try:
-        try:
-            stream = os.fdopen(fd, 'wb')
-        except BaseException:
-            os.close(fd)
-            raise
-        with stream:
-            os.fchmod(stream.fileno(), 0o600)
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        sync_dir(path.parent)
-    except BaseException:
-        discard_created([path])
-        raise
+    fs.exclusive_write(path, data, sync=sync_dir)
 
 
 def replace_json(path, value):
     temporary = path.parent / ('.' + path.name + '.' + secrets.token_hex(8))
     try:
         exclusive_write(temporary, canonical(value))
-        os.replace(temporary, path)
+        fs.replace(temporary, path)
         sync_dir(path.parent)
     finally:
         if temporary.exists():
@@ -79,22 +59,17 @@ def replace_json(path, value):
 
 
 def checked_fd(path, flags, *, create=True):
-    fd = os.open(path, flags | (os.O_CREAT if create else 0) | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.geteuid():
-        os.close(fd)
-        raise OSError('私有文件权限或类型不符')
-    return fd
+    return fs.checked_fd(path, flags, create=create)
 
 
 @contextmanager
 def file_lock(path):
     fd = checked_fd(path, os.O_RDWR)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        fs.lock(fd)
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        fs.unlock(fd)
         os.close(fd)
 
 
@@ -113,31 +88,21 @@ def archive_lock(home, ident, *, blocking=True):
     acquired = False
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
-        except BlockingIOError:
-            yield False
+            acquired = fs.lock(fd, blocking=blocking)
         except OSError:
             raise Stop('恢复档案锁无法安全取得；停止，请核对本地档案', code=4) from None
         else:
-            acquired = True
-            yield True
+            yield acquired
     finally:
         if acquired:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            fs.unlock(fd)
         os.close(fd)
 
 
 def directories(home, create=False):
     # docs is the shared V1 parent: never chmod it or inspect its contents.
     parent = Path(home) / 'docs'
-    if create:
-        try:
-            parent.mkdir(mode=0o700)
-        except FileExistsError:
-            pass
-    info = parent.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
-        raise OSError('docs 目录类型或属主不符')
+    fs.shared_directory(parent, create)
     root = Path(home) / ROOT
     secure_directory(root, create)
     secure_directory(root / '.pending', create)
